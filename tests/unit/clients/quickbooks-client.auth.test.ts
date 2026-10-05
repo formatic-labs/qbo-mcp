@@ -105,7 +105,7 @@ jest.unstable_mockModule('fs', () => ({
   },
 }));
 
-const { quickbooksClient } = await import('../../../src/clients/quickbooks-client');
+const { quickbooksClient, QuickbooksClient } = await import('../../../src/clients/quickbooks-client');
 
 // Polls until the OAuth callback handler has been registered by startOAuthFlow.
 async function untilCallbackRegistered(timeoutMs = 2000): Promise<void> {
@@ -127,6 +127,22 @@ async function untilAuthorizeUriCalled(client: MockOAuth, timeoutMs = 2000): Pro
 }
 
 describe('QuickbooksClient.authenticate', () => {
+  // Fork: the stdio MCP server disables the interactive flow (it would write to
+  // stdout and corrupt the protocol); a dead token must yield an actionable error.
+  it('returns a "run npm run auth" error instead of starting the browser flow when interactive auth is disabled', async () => {
+    (quickbooksClient as unknown as { accessTokenExpiry?: Date }).accessTokenExpiry = new Date(0);
+    refreshDispatch.mockRejectedValueOnce(new Error('invalid_grant'));
+    QuickbooksClient.interactiveAuthAllowed = false;
+    try {
+      await expect(quickbooksClient.authenticate()).rejects.toThrow(/npm run auth/);
+      expect(callbackHandler).toBeUndefined();
+    } finally {
+      QuickbooksClient.interactiveAuthAllowed = true;
+      // The rejected flow cleared the in-memory token; restore it for later tests.
+      (quickbooksClient as unknown as { refreshToken?: string }).refreshToken = process.env.QUICKBOOKS_REFRESH_TOKEN;
+    }
+  });
+
   it('refreshes silently without starting the interactive flow when the refresh token works', async () => {
     refreshDispatch.mockResolvedValueOnce({
       token: { access_token: 'access-1', expires_in: 3600, refresh_token: 'rotated-1' },
@@ -210,4 +226,56 @@ describe('QuickbooksClient.authenticate', () => {
     expect(res.writeHead).toHaveBeenCalledWith(400, { 'Content-Type': 'text/plain' });
     expect(createTokenDispatch).not.toHaveBeenCalled();
   });
+});
+
+describe('QuickbooksClient fork: production sign-in via public redirect', () => {
+  beforeEach(() => {
+    // Earlier tests can leave a pending flow behind; start each case clean.
+    const c = quickbooksClient as unknown as { authInFlight?: unknown; isAuthenticating: boolean };
+    c.authInFlight = undefined;
+    c.isAuthenticating = false;
+    callbackHandler = undefined;
+    // Drop any queued once-responses left over from earlier tests.
+    refreshDispatch.mockReset();
+    createTokenDispatch.mockReset();
+  });
+
+  // Fork: QUICKBOOKS_AUTH_REDIRECT_URI enables the interactive flow for production via an HTTPS tunnel.
+  it('rejects a non-https QUICKBOOKS_AUTH_REDIRECT_URI', async () => {
+    (quickbooksClient as unknown as { accessTokenExpiry?: Date }).accessTokenExpiry = new Date(0);
+    refreshDispatch.mockRejectedValueOnce(new Error('invalid_grant'));
+    process.env.QUICKBOOKS_AUTH_REDIRECT_URI = 'http://insecure.example/callback';
+    try {
+      await expect(quickbooksClient.authenticate()).rejects.toThrow(/must be an https:\/\/ URL/);
+    } finally {
+      delete process.env.QUICKBOOKS_AUTH_REDIRECT_URI;
+      (quickbooksClient as unknown as { refreshToken?: string }).refreshToken = process.env.QUICKBOOKS_REFRESH_TOKEN;
+    }
+  });
+
+  it('in production with a public redirect, authorizes and exchanges with that redirect', async () => {
+    const c = quickbooksClient as unknown as { environment: string; accessTokenExpiry?: Date; refreshToken?: string };
+    c.environment = 'production';
+    c.refreshToken = undefined; // no token yet -> first-time sign-in
+    process.env.QUICKBOOKS_AUTH_REDIRECT_URI = 'https://tunnel.example/callback';
+    createTokenDispatch.mockResolvedValueOnce({ token: { refresh_token: 'prod-rt', realmId: '777' } });
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'prod-at', expires_in: 3600, refresh_token: 'prod-rt' } });
+    try {
+      const before = oauthInstances.length;
+      const authPromise = quickbooksClient.authenticate();
+      await untilCallbackRegistered();
+      const flowClient = oauthInstances[before];
+      expect(flowClient.cfg.redirectUri).toBe('https://tunnel.example/callback');
+      await untilAuthorizeUriCalled(flowClient);
+      const { state } = flowClient.authorizeUri.mock.calls[0][0] as { state: string };
+      await callbackHandler!({ url: `/callback?code=xyz&state=${state}`, method: 'GET' }, { writeHead: jest.fn(), end: jest.fn() });
+      await authPromise;
+      expect(flowClient.createToken).toHaveBeenCalled();
+    } finally {
+      delete process.env.QUICKBOOKS_AUTH_REDIRECT_URI;
+      c.environment = 'sandbox';
+      c.refreshToken = process.env.QUICKBOOKS_REFRESH_TOKEN;
+      callbackHandler = undefined;
+    }
+  }, 15000);
 });

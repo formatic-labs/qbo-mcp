@@ -5,6 +5,31 @@ All notable changes to the QuickBooks Online MCP Server are documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — formatic-labs fork
+
+### Added
+- 2026-10-05 — **At-rest encryption of secrets (Windows DPAPI).** `src/helpers/token-crypto.ts`: values stored as
+  `dpapi:<base64>` are decrypted at startup; with `QUICKBOOKS_TOKEN_ENCRYPTION=dpapi`, rotated refresh tokens are
+  written encrypted. `npm run encrypt-env` (`src/encrypt-env.ts`, `src/helpers/encrypt-env-file.ts`) converts an
+  existing `.env` in place. Secrets go to PowerShell over stdin, never the command line. Why: Intuit's app security
+  requirements; a plaintext `.env` on a workstation doesn't meet them. Verified with a real DPAPI round trip on Windows.
+- 2026-10-05 — **QuickBooks Fault detail + `intuit_tid` + error log.** `formatError` now surfaces each Fault error's
+  message/code/detail and the `intuit_tid` response header (previously only "Request failed with status code 400"),
+  and appends every formatted error to `logs/qbo-errors.log` (override `QUICKBOOKS_ERROR_LOG_PATH`, or `off`).
+  Why: diagnose real API errors and give Intuit support a trace id. Verified against the sandbox.
+- 2026-10-05 — **Production sign-in via public HTTPS redirect.** `QUICKBOOKS_AUTH_REDIRECT_URI` (https tunnel to port
+  8000) lets `npm run auth` complete a production OAuth sign-in with the server's own flow instead of a manual
+  handshake. `npm run auth:prod` / `npm run encrypt-env:prod` (`scripts/with-prod-store.mjs`) target a separate
+  `.env.production` token store so sandbox and production can't be mixed up.
+
+### Fixed
+- 2026-10-05 — **MCP connection no longer dies on a revoked/expired token.** The stdio server sets
+  `QuickbooksClient.interactiveAuthAllowed = false`, so a dead token returns "run `npm run auth`" instead of starting
+  the browser flow, whose stdout output corrupted the MCP stream ("Connection closed").
+
+### Changed
+- `.gitignore`: `.env.production`, `.env.sandbox`, `logs/`.
+
 ## [0.0.1] - 2024-01-13
 
 ### Summary

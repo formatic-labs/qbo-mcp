@@ -7,6 +7,10 @@ coverage
 .env
 .env.local
 .env.*.local
+# Fork: production token store + error logs
+.env.production
+.env.sandbox
+logs/
 tokens.json
 
 start.cmd

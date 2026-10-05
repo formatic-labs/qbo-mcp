@@ -75,6 +75,13 @@ jest.unstable_mockModule('node-quickbooks', () => ({
 
 jest.unstable_mockModule('open', () => ({ default: jest.fn(async () => undefined) }));
 
+// Fork: deterministic stand-in for DPAPI so the encrypted-rotation path is testable.
+jest.unstable_mockModule('../../../src/helpers/token-crypto', () => ({
+  decryptSecret: (v: string | undefined) => v,
+  encryptSecret: (v: string) => `dpapi:<${v}>`,
+  encryptionEnabled: () => process.env.QUICKBOOKS_TOKEN_ENCRYPTION === 'dpapi',
+}));
+
 jest.unstable_mockModule('http', () => ({
   default: {
     createServer: jest.fn(() => ({
@@ -108,6 +115,18 @@ describe('saveTokensToEnv (via authenticate)', () => {
     // which calls saveTokensToEnv() when the refresh token rotates.
     (quickbooksClient as any).accessTokenExpiry = new Date(0);
     (quickbooksClient as any).authInFlight = undefined;
+  });
+
+  // Fork: with QUICKBOOKS_TOKEN_ENCRYPTION=dpapi the rotated token is persisted encrypted.
+  it('persists the rotated refresh token encrypted when encryption is enabled', async () => {
+    process.env.QUICKBOOKS_TOKEN_ENCRYPTION = 'dpapi';
+    try {
+      await quickbooksClient.authenticate();
+    } finally {
+      delete process.env.QUICKBOOKS_TOKEN_ENCRYPTION;
+    }
+    const written = writeFileSyncSpy.mock.calls[0][1];
+    expect(written).toContain(`QUICKBOOKS_REFRESH_TOKEN=dpapi:<rotated-${tokenCounter}>`);
   });
 
   it('uses atomic temp+rename for regular files (not symlinks)', async () => {

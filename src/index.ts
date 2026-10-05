@@ -203,8 +203,14 @@ import { GetCustomerBalanceTool } from "./tools/get-customer-balance.tool.js";
 import { GetAgedPayablesTool } from "./tools/get-aged-payables.tool.js";
 import { GetVendorExpensesTool } from "./tools/get-vendor-expenses.tool.js";
 import { GetVendorBalanceTool } from "./tools/get-vendor-balance.tool.js";
+import { QuickbooksClient } from "./clients/quickbooks-client.js";
 
 const main = async () => {
+  // Fork: never start the interactive browser OAuth flow inside the stdio MCP
+  // server — it writes to stdout and breaks the protocol stream. A dead token
+  // returns an actionable "run npm run auth" error instead.
+  QuickbooksClient.interactiveAuthAllowed = false;
+
   // Create an MCP server
   const server = QuickbooksMCPServer.GetServer();
   // Add tools for customers

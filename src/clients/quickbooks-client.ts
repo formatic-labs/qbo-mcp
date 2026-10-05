@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import open from 'open';
+import { decryptSecret, encryptSecret, encryptionEnabled } from '../helpers/token-crypto.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,8 +51,9 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const client_id = process.env.QUICKBOOKS_CLIENT_ID;
-const client_secret = process.env.QUICKBOOKS_CLIENT_SECRET;
-const refresh_token = process.env.QUICKBOOKS_REFRESH_TOKEN;
+// Fork: secrets may be stored DPAPI-encrypted (`dpapi:` prefix) — see token-crypto.ts.
+const client_secret = decryptSecret(process.env.QUICKBOOKS_CLIENT_SECRET);
+const refresh_token = decryptSecret(process.env.QUICKBOOKS_REFRESH_TOKEN);
 const realm_id = process.env.QUICKBOOKS_REALM_ID;
 const environment = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox';
 // Fix for Issue #5: Use env var with underscore (QUICKBOOKS_REDIRECT_URI)
@@ -78,6 +80,12 @@ export class QuickbooksClient {
   private oauthClient: OAuthClient;
   private isAuthenticating: boolean = false;
   private redirectUri: string;
+
+  // Fork: when false, a dead refresh token produces an actionable error instead
+  // of starting the interactive browser flow. The MCP stdio server sets this to
+  // false — the flow prints to stdout, which corrupts the MCP protocol stream
+  // and kills the connection. `npm run auth` (auth-server.ts) leaves it true.
+  static interactiveAuthAllowed = true;
 
   // Refresh 5 minutes before actual expiry to avoid edge cases
   private static readonly TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
@@ -134,7 +142,7 @@ export class QuickbooksClient {
       // slice would keep quotes/comments and could poison a valid token with a
       // value that only looks different.
       const parsed = dotenv.parse(fs.readFileSync(TOKEN_STORE_PATH));
-      const value = parsed.QUICKBOOKS_REFRESH_TOKEN?.trim();
+      const value = decryptSecret(parsed.QUICKBOOKS_REFRESH_TOKEN?.trim());
       return value || undefined;
     } catch {
       return undefined;
@@ -251,8 +259,24 @@ export class QuickbooksClient {
     // rejects localhost redirect URIs for production apps — so this can only
     // ever succeed in sandbox. Fail fast with guidance rather than opening a
     // doomed browser window on a production server.
-    if (this.environment === 'production') {
+    // Fork: QUICKBOOKS_AUTH_REDIRECT_URI is a public HTTPS URL (Cloudflare /
+    // ngrok / Tailscale Funnel) that tunnels to this machine's port 8000. When
+    // set, the interactive flow authorizes and exchanges with it — which is
+    // what makes a production sign-in possible from `npm run auth`.
+    const publicRedirect = process.env.QUICKBOOKS_AUTH_REDIRECT_URI?.trim();
+    if (publicRedirect && !publicRedirect.startsWith('https://')) {
+      throw new Error(`QUICKBOOKS_AUTH_REDIRECT_URI must be an https:// URL, got "${publicRedirect}"`);
+    }
+
+    if (this.environment === 'production' && !publicRedirect) {
       throw this.reauthError();
+    }
+
+    if (!QuickbooksClient.interactiveAuthAllowed) {
+      throw new Error(
+        'QuickBooks is not connected (the authorization was disconnected, revoked, or expired). ' +
+          'Reconnect by running `npm run auth` in the qbo-mcp folder, then retry the request.'
+      );
     }
 
     if (this.isAuthenticating) {
@@ -271,7 +295,7 @@ export class QuickbooksClient {
       clientId: this.clientId,
       clientSecret: this.clientSecret,
       environment: this.environment,
-      redirectUri: `http://localhost:${port}/callback`,
+      redirectUri: publicRedirect || `http://localhost:${port}/callback`,
     });
 
     return new Promise((resolve, reject) => {
@@ -435,7 +459,13 @@ export class QuickbooksClient {
       }
     };
 
-    if (this.refreshToken) updateEnvVar('QUICKBOOKS_REFRESH_TOKEN', this.refreshToken);
+    // Fork: write the rotated refresh token encrypted when the operator opted in.
+    if (this.refreshToken) {
+      updateEnvVar(
+        'QUICKBOOKS_REFRESH_TOKEN',
+        encryptionEnabled() ? encryptSecret(this.refreshToken) : this.refreshToken
+      );
+    }
     if (this.realmId) updateEnvVar('QUICKBOOKS_REALM_ID', this.realmId);
 
     const newContent = envLines.join('\n');

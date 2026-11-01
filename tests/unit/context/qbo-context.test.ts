@@ -30,10 +30,15 @@ jest.unstable_mockModule('dotenv', () => ({
   default: { config: dotenvConfig, parse: jest.fn(() => ({})) },
 }));
 
+// Programmable refresh response (used by the hosted reauth test).
+const refreshDispatch = jest.fn<(token: string) => Promise<unknown>>();
+const openMock = jest.fn(async () => undefined);
+const createServerMock = jest.fn(() => ({ listen: jest.fn(), close: jest.fn(), on: jest.fn() }));
+
 jest.unstable_mockModule('intuit-oauth', () => {
   class MockOAuthClient {
     static scopes = { Accounting: 'com.intuit.quickbooks.accounting' };
-    refreshUsingToken = jest.fn();
+    refreshUsingToken = jest.fn((token: string) => refreshDispatch(token));
     createToken = jest.fn();
     authorizeUri = jest.fn(() => 'https://mock');
     constructor(_cfg: Record<string, unknown>) {}
@@ -51,10 +56,15 @@ jest.unstable_mockModule('node-quickbooks', () => ({
     }
   },
 }));
-jest.unstable_mockModule('open', () => ({ default: jest.fn(async () => undefined) }));
-jest.unstable_mockModule('http', () => ({
-  default: { createServer: jest.fn(() => ({ listen: jest.fn(), close: jest.fn(), on: jest.fn() })) },
-}));
+jest.unstable_mockModule('open', () => ({ default: openMock }));
+jest.unstable_mockModule('http', () => ({ default: { createServer: createServerMock } }));
+
+// Importing the library must not register process-level listeners (those are
+// installed only by the stdio entries via installProcessErrorLogging()).
+const listenersBefore = {
+  uncaught: process.listenerCount('uncaughtException'),
+  unhandled: process.listenerCount('unhandledRejection'),
+};
 
 // Sequential on purpose: the two modules import each other, and jest's ESM
 // linker mis-links a cycle requested by two concurrent dynamic imports.
@@ -73,6 +83,10 @@ const importResult = await importBoth().then(
 
 // jest's clearMocks resets call counts before each test, so capture this now.
 const dotenvCallsAtImport = dotenvConfig.mock.calls.length;
+const listenersAfter = {
+  uncaught: process.listenerCount('uncaughtException'),
+  unhandled: process.listenerCount('unhandledRejection'),
+};
 
 function mods() {
   if (!importResult.ok) throw importResult.error;
@@ -110,6 +124,41 @@ describe('qbo-context', () => {
   it('importing the client and context without QUICKBOOKS_* env does not throw', () => {
     expect(importResult.ok).toBe(true);
     expect(dotenvCallsAtImport).toBe(0);
+    expect(listenersAfter).toEqual(listenersBefore);
+  });
+
+  it('the lazy quickbooksClient passes instanceof and is not thenable (neither builds the env client)', async () => {
+    const { quickbooksClient, QuickbooksClient } = mods();
+    expect(quickbooksClient instanceof QuickbooksClient).toBe(true);
+    expect((quickbooksClient as unknown as { then?: unknown }).then).toBeUndefined();
+    // Awaiting / returning it from an async function must not try to build it.
+    const awaited = await Promise.resolve(quickbooksClient);
+    expect(awaited).toBe(quickbooksClient);
+    expect(dotenvConfig).not.toHaveBeenCalled();
+  });
+
+  it('installProcessErrorLogging registers the stdio error loggers once (idempotent)', () => {
+    const { installProcessErrorLogging } = mods();
+    const before = process.listenerCount('uncaughtException');
+    const beforeRej = process.listenerCount('unhandledRejection');
+    installProcessErrorLogging();
+    installProcessErrorLogging();
+    expect(process.listenerCount('uncaughtException')).toBe(before + 1);
+    expect(process.listenerCount('unhandledRejection')).toBe(beforeRej + 1);
+
+    const onUncaught = process.listeners('uncaughtException').at(-1)!;
+    const onRejection = process.listeners('unhandledRejection').at(-1)!;
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      (onUncaught as (e: Error) => void)(new Error('boom'));
+      (onRejection as (r: unknown) => void)('nope');
+      expect(errSpy).toHaveBeenCalledWith('[auth-server] uncaughtException:', expect.any(Error));
+      expect(errSpy).toHaveBeenCalledWith('[auth-server] unhandledRejection:', 'nope');
+    } finally {
+      // Leave jest's own process listeners as they were.
+      process.removeListener('uncaughtException', onUncaught);
+      process.removeListener('unhandledRejection', onRejection);
+    }
   });
 
   it('getEnvClient throws only when called, and names the missing env', () => {
@@ -209,9 +258,57 @@ describe('qbo-context', () => {
     expect(err.message).toMatch(/not connected/i);
 
     // A context still works in hosted mode.
+    expect(createServerMock).not.toHaveBeenCalled();
     const qb = (await runWithQboContext({ client: freshClient('hosted-realm') }, () =>
       QuickbooksClient.getInstance(),
     )) as unknown as { realmId: string };
     expect(qb.realmId).toBe('hosted-realm');
+  });
+
+  it('hosted: a rejected sandbox refresh token flags reconnect and never starts the OAuth flow', async () => {
+    const { QuickbooksClient, runWithQboContext, enterHostedMode } = mods();
+    const { QboReauthRequiredError } = await import('../../../src/clients/token-store');
+    enterHostedMode();
+    refreshDispatch.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 400'), { error: 'invalid_grant' }),
+    );
+    const store = memoryStore();
+    const client = new QuickbooksClient({
+      clientId: 'cid',
+      clientSecret: 'secret',
+      refreshToken: 'dead-refresh',
+      realmId: 'hosted-dead',
+      environment: 'sandbox',
+      redirectUri: 'http://localhost:8000/callback',
+      tokenStore: store,
+    });
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(runWithQboContext({ client }, () => QuickbooksClient.getInstance())).rejects.toBeInstanceOf(
+      QboReauthRequiredError,
+    );
+    expect(store.markReauthRequired).toHaveBeenCalledWith('QuickBooks refresh token missing or rejected');
+    expect(createServerMock).not.toHaveBeenCalled();
+    expect(openMock).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it('hosted: a context client with no stored tokens is a reconnect, not an OAuth flow', async () => {
+    const { QuickbooksClient, runWithQboContext } = mods();
+    const { QboReauthRequiredError } = await import('../../../src/clients/token-store');
+    const store = memoryStore();
+    const client = new QuickbooksClient({
+      clientId: 'cid',
+      clientSecret: 'secret',
+      environment: 'sandbox',
+      redirectUri: 'http://localhost:8000/callback',
+      tokenStore: store,
+    });
+    await expect(runWithQboContext({ client }, () => QuickbooksClient.getAuthCredentials())).rejects.toBeInstanceOf(
+      QboReauthRequiredError,
+    );
+    expect(store.markReauthRequired).toHaveBeenCalledTimes(1);
+    expect(createServerMock).not.toHaveBeenCalled();
+    expect(openMock).not.toHaveBeenCalled();
   });
 });

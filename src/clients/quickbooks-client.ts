@@ -41,14 +41,35 @@ function tokenStorePath(): string {
   return tokenStorePathOverride || path.join(__dirname, '..', '..', '.env');
 }
 
-// Register once at module level — registering inside startOAuthFlow() would
-// accumulate duplicate handlers on every OAuth call.
-process.on('uncaughtException', (err) => {
-  console.error('[auth-server] uncaughtException:', err);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('[auth-server] unhandledRejection:', reason);
-});
+// Fork: load the token-store .env into process.env (override: true so values
+// from the token store always win over any empty-string placeholders a host
+// app, e.g. Claude Desktop, may inject via its env config). The stdio entries
+// (index.ts, auth-server.ts) call this at startup — before any tool runs — so
+// every QUICKBOOKS_* setting in .env (attachable base dir, URL timeout, error
+// log path, ...) is in effect process-wide, as when this ran at import.
+// createEnvClient() calls it too; repeating it is harmless. Never called on a
+// hosted import, so importing the library stays side-effect free.
+export function loadTokenStoreEnv(): string {
+  const storePath = tokenStorePath();
+  dotenv.config({ path: storePath, override: true });
+  return storePath;
+}
+
+// Fork: the upstream process-level error logging, previously registered at
+// module import. The stdio entries call this; a hosted importer (which owns
+// its own process) never gets these listeners. Idempotent — registering more
+// than once would accumulate duplicate handlers.
+let processErrorLoggingInstalled = false;
+export function installProcessErrorLogging(): void {
+  if (processErrorLoggingInstalled) return;
+  processErrorLoggingInstalled = true;
+  process.on('uncaughtException', (err) => {
+    console.error('[auth-server] uncaughtException:', err);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[auth-server] unhandledRejection:', reason);
+  });
+}
 
 // Fork: the stdio env client is built on demand (via getEnvClient() in
 // src/context/qbo-context.ts, which memoizes it) instead of at module import,
@@ -56,12 +77,9 @@ process.on('unhandledRejection', (reason) => {
 // Behaviour once built is unchanged: load the token-store .env, read env,
 // decrypt DPAPI secrets, and throw if the required values are missing.
 export function createEnvClient(): QuickbooksClient {
-  const storePath = tokenStorePath();
-  // Use override: true so that values from the token store always win over any
-  // empty-string placeholders a host app (e.g. Claude Desktop) may inject via
-  // its env config. This prevents the server from starting with blank
-  // REFRESH_TOKEN / REALM_ID even when the host config has those keys set to "".
-  dotenv.config({ path: storePath, override: true });
+  // Prevents the server from starting with blank REFRESH_TOKEN / REALM_ID even
+  // when the host config has those keys set to "" (see loadTokenStoreEnv).
+  const storePath = loadTokenStoreEnv();
 
   const client_id = process.env.QUICKBOOKS_CLIENT_ID;
   // Fork: secrets may be stored DPAPI-encrypted (`dpapi:` prefix) — see token-crypto.ts.
@@ -300,6 +318,16 @@ export class QuickbooksClient {
   }
 
   private async startOAuthFlow(): Promise<void> {
+    // Fork: a hosted (serverless, multi-company) process must never open a
+    // browser or bind a local callback server. Flag the company for reconnect
+    // so the host's "reconnect QuickBooks" handling fires.
+    if (isHostedMode()) {
+      throw await this.reauthRequired(
+        new QboReauthRequiredError('QuickBooks must be reconnected for this company.'),
+        'QuickBooks refresh token missing or rejected',
+      );
+    }
+
     // The interactive flow below binds a localhost callback server, but Intuit
     // rejects localhost redirect URIs for production apps — so this can only
     // ever succeed in sandbox. Fail fast with guidance rather than opening a
@@ -779,9 +807,13 @@ export class QuickbooksClient {
 // The stdio env client under its upstream name (auth-server.ts and tests use
 // it). Fork: a lazy stand-in — the real client is built by getEnvClient() on
 // first property access, not at import. Methods are bound to the real client
-// and property writes go to it, so it behaves like the instance itself.
-export const quickbooksClient: QuickbooksClient = new Proxy({} as QuickbooksClient, {
+// and property writes go to it, so it behaves like the instance itself. The
+// target carries the class prototype so `instanceof QuickbooksClient` holds,
+// and `then` reads as undefined so awaiting/returning it never builds the client.
+export const quickbooksClient: QuickbooksClient = new Proxy(
+  Object.create(QuickbooksClient.prototype) as QuickbooksClient, {
   get(_target, prop) {
+    if (prop === 'then') return undefined;
     const client = getEnvClient();
     const value = Reflect.get(client, prop, client);
     return typeof value === 'function' ? value.bind(client) : value;

@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Request-context review fixes** — (1) `loadTokenStoreEnv()` (new export of `quickbooks-client.ts`)
+  loads the token-store `.env` into `process.env`. `src/index.ts` and `src/auth-server.ts` call it at startup, and
+  `createEnvClient()` calls it too, so `.env` settings read before the client is built (`QUICKBOOKS_ATTACHABLE_BASE_DIR`,
+  `QUICKBOOKS_ATTACHABLE_URL_TIMEOUT_MS`, `QUICKBOOKS_ERROR_LOG_PATH`) work on the first stdio call again. Importing
+  the library still has no side effects. (2) In hosted mode `startOAuthFlow()` never opens a browser or a local
+  callback server. It flags the company through `tokenStore.markReauthRequired` and throws `QboReauthRequiredError`.
+  (3) The lazy `quickbooksClient` passes `instanceof QuickbooksClient` and is not thenable. (4) The upstream
+  `uncaughtException`/`unhandledRejection` loggers moved from module import into `installProcessErrorLogging()`, which
+  only the stdio entries call. Why: the Task 3 review found these four regressions/leaks in the context change.
 - 2026-11-01 — **Per-call QuickBooks request context, fail-closed hosted mode** — new `src/context/qbo-context.ts`
   (`runWithQboContext`, `currentQboContext`, `enterHostedMode`, `QboNotConnectedError`, `getEnvClient`, types
   `QboActor` / `QboCallContext`, on `AsyncLocalStorage`). `QuickbooksClient.getInstance()` / `getAuthCredentials()`

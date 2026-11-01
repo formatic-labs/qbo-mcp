@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Per-call QuickBooks request context, fail-closed hosted mode** — new `src/context/qbo-context.ts`
+  (`runWithQboContext`, `currentQboContext`, `enterHostedMode`, `QboNotConnectedError`, `getEnvClient`, types
+  `QboActor` / `QboCallContext`, on `AsyncLocalStorage`). `QuickbooksClient.getInstance()` / `getAuthCredentials()`
+  now use the context's client when there is one, so the unchanged handlers serve one company per call. After
+  `enterHostedMode()`, a call with no context rejects with `QboNotConnectedError` without building the env client,
+  and constructing a `QuickbooksClient` without an explicit `tokenStore` throws (no `.env` fallback). The module-level
+  env read, `dotenv` load and missing-env `throw` in `quickbooks-client.ts` moved into `createEnvClient()`, built
+  lazily and memoized by `getEnvClient()`; `quickbooksClient` stays exported as a lazy stand-in for the env client.
+  Why: the hosted connector imports the library with no `QUICKBOOKS_*` env and must never touch the `.env` store;
+  stdio (`npm start`, `npm run auth`, DPAPI) behaves as before — verified with the sandbox smoke test.
 - 2026-11-01 — **Tool catalog + hosted allowlist** — `src/tools/catalog.ts` now holds `ALL_TOOLS` (the 142 tools
   `src/index.ts` used to register one by one, same order) and `HOSTED_TOOL_ALLOWLIST` (the 22-tool estimate set the
   hosted connector may expose). `src/index.ts` registers via a loop over `ALL_TOOLS`. Why: the shared package and the

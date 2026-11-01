@@ -9,6 +9,7 @@ import open from 'open';
 import { decryptSecret } from '../helpers/token-crypto.js';
 import { EnvFileTokenStore } from './env-file-token-store.js';
 import { QboReauthRequiredError, QboTokenPersistError, type TokenStore } from './token-store.js';
+import { currentQboContext, getEnvClient, isHostedMode, QboNotConnectedError } from '../context/qbo-context.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -21,26 +22,24 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // default path can't be written) — and lets a per-tenant host keep each
 // connection's rotated token in its own isolated path.
 //
-// NOTE: this value is resolved BEFORE dotenv loads the file below, so the
-// override only takes effect when set in the host process env (e.g. the MCP
-// server config's env block) — setting it inside .env has no effect. It must
-// be absolute: a relative path would resolve against the host app's working
-// directory, which is unpredictable (the exact failure the module-relative
-// default exists to avoid).
-const tokenStorePathOverride = process.env.QUICKBOOKS_TOKEN_STORE_PATH?.trim();
-if (tokenStorePathOverride && !path.isAbsolute(tokenStorePathOverride)) {
-  throw Error(
-    `QUICKBOOKS_TOKEN_STORE_PATH must be an absolute path, got "${tokenStorePathOverride}"`
-  );
+// NOTE: this value is resolved BEFORE dotenv loads the file (createEnvClient),
+// so the override only takes effect when set in the host process env (e.g. the
+// MCP server config's env block) — setting it inside .env has no effect. It
+// must be absolute: a relative path would resolve against the host app's
+// working directory, which is unpredictable (the exact failure the
+// module-relative default exists to avoid).
+//
+// Fork: resolved lazily (on first use) rather than at import, so importing the
+// library in a hosted process with no QUICKBOOKS_* env never throws.
+function tokenStorePath(): string {
+  const tokenStorePathOverride = process.env.QUICKBOOKS_TOKEN_STORE_PATH?.trim();
+  if (tokenStorePathOverride && !path.isAbsolute(tokenStorePathOverride)) {
+    throw Error(
+      `QUICKBOOKS_TOKEN_STORE_PATH must be an absolute path, got "${tokenStorePathOverride}"`
+    );
+  }
+  return tokenStorePathOverride || path.join(__dirname, '..', '..', '.env');
 }
-const TOKEN_STORE_PATH =
-  tokenStorePathOverride || path.join(__dirname, '..', '..', '.env');
-
-// Use override: true so that values from the token store always win over any
-// empty-string placeholders a host app (e.g. Claude Desktop) may inject via
-// its env config. This prevents the server from starting with blank
-// REFRESH_TOKEN / REALM_ID even when the host config has those keys set to "".
-dotenv.config({ path: TOKEN_STORE_PATH, override: true });
 
 // Register once at module level — registering inside startOAuthFlow() would
 // accumulate duplicate handlers on every OAuth call.
@@ -51,18 +50,42 @@ process.on('unhandledRejection', (reason) => {
   console.error('[auth-server] unhandledRejection:', reason);
 });
 
-const client_id = process.env.QUICKBOOKS_CLIENT_ID;
-// Fork: secrets may be stored DPAPI-encrypted (`dpapi:` prefix) — see token-crypto.ts.
-const client_secret = decryptSecret(process.env.QUICKBOOKS_CLIENT_SECRET);
-const refresh_token = decryptSecret(process.env.QUICKBOOKS_REFRESH_TOKEN);
-const realm_id = process.env.QUICKBOOKS_REALM_ID;
-const environment = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox';
-// Fix for Issue #5: Use env var with underscore (QUICKBOOKS_REDIRECT_URI)
-const redirect_uri = process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:8000/callback';
+// Fork: the stdio env client is built on demand (via getEnvClient() in
+// src/context/qbo-context.ts, which memoizes it) instead of at module import,
+// so the module can be imported with no QUICKBOOKS_* env (hosted connector).
+// Behaviour once built is unchanged: load the token-store .env, read env,
+// decrypt DPAPI secrets, and throw if the required values are missing.
+export function createEnvClient(): QuickbooksClient {
+  const storePath = tokenStorePath();
+  // Use override: true so that values from the token store always win over any
+  // empty-string placeholders a host app (e.g. Claude Desktop) may inject via
+  // its env config. This prevents the server from starting with blank
+  // REFRESH_TOKEN / REALM_ID even when the host config has those keys set to "".
+  dotenv.config({ path: storePath, override: true });
 
-// Only throw error if client_id or client_secret is missing
-if (!client_id || !client_secret || !redirect_uri) {
-  throw Error("Client ID, Client Secret and Redirect URI must be set in environment variables");
+  const client_id = process.env.QUICKBOOKS_CLIENT_ID;
+  // Fork: secrets may be stored DPAPI-encrypted (`dpapi:` prefix) — see token-crypto.ts.
+  const client_secret = decryptSecret(process.env.QUICKBOOKS_CLIENT_SECRET);
+  const refresh_token = decryptSecret(process.env.QUICKBOOKS_REFRESH_TOKEN);
+  const realm_id = process.env.QUICKBOOKS_REALM_ID;
+  const environment = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox';
+  // Fix for Issue #5: Use env var with underscore (QUICKBOOKS_REDIRECT_URI)
+  const redirect_uri = process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:8000/callback';
+
+  // Only throw error if client_id or client_secret is missing
+  if (!client_id || !client_secret || !redirect_uri) {
+    throw Error("Client ID, Client Secret and Redirect URI must be set in environment variables");
+  }
+
+  return new QuickbooksClient({
+    clientId: client_id,
+    clientSecret: client_secret,
+    refreshToken: refresh_token,
+    realmId: realm_id,
+    environment: environment,
+    redirectUri: redirect_uri,
+    tokenStore: new EnvFileTokenStore(storePath),
+  });
 }
 
 // ── QuickbooksClient ─────────────────────────────────────────────────────────
@@ -134,7 +157,11 @@ export class QuickbooksClient {
     this.realmId = config.realmId;
     this.environment = config.environment;
     this.redirectUri = config.redirectUri;
-    this.tokenStore = config.tokenStore ?? new EnvFileTokenStore(TOKEN_STORE_PATH);
+    // Fork: hosted mode must never fall back to the .env token store.
+    if (!config.tokenStore && isHostedMode()) {
+      throw new Error('QuickbooksClient requires an explicit tokenStore in hosted mode');
+    }
+    this.tokenStore = config.tokenStore ?? new EnvFileTokenStore(tokenStorePath());
     this.accessToken = config.accessToken;
     this.accessTokenExpiry = config.accessTokenExpiresAt;
     this.strictPersistence = config.strictPersistence ?? false;
@@ -700,14 +727,26 @@ export class QuickbooksClient {
   // ── Called by every handler on every request ─────────────────────────────
   // Checks token freshness on each invocation so handlers stay functional
   // across 60-minute token boundaries without server restarts.
+  //
+  // Fork: the client comes from the active request context when there is one
+  // (hosted: one client per company per call), else the stdio env client.
+  // In hosted mode a call with no context fails closed — never the env client.
+  private static resolveClient(): QuickbooksClient {
+    const ctx = currentQboContext();
+    if (ctx) return ctx.client;
+    if (isHostedMode()) throw new QboNotConnectedError();
+    return getEnvClient();
+  }
+
   static async getInstance(): Promise<QuickBooks> {
-    if (quickbooksClient.isTokenExpiredOrExpiringSoon()) {
-      await quickbooksClient.authenticate();
+    const client = QuickbooksClient.resolveClient();
+    if (client.isTokenExpiredOrExpiringSoon()) {
+      await client.authenticate();
     }
-    if (!quickbooksClient.quickbooksInstance) {
-      await quickbooksClient.authenticate();
+    if (!client.quickbooksInstance) {
+      await client.authenticate();
     }
-    return quickbooksClient.quickbooksInstance!;
+    return client.quickbooksInstance!;
   }
 
   // Static counterpart to getInstance() — returns raw OAuth credentials for
@@ -715,16 +754,17 @@ export class QuickbooksClient {
   // (e.g. POST /upload for binary attachments). Ensures token freshness on
   // every invocation, same as getInstance().
   static async getAuthCredentials(): Promise<{ accessToken: string; realmId: string; isSandbox: boolean }> {
-    if (quickbooksClient.isTokenExpiredOrExpiringSoon() || !quickbooksClient.accessToken) {
-      await quickbooksClient.authenticate();
+    const client = QuickbooksClient.resolveClient();
+    if (client.isTokenExpiredOrExpiringSoon() || !client.accessToken) {
+      await client.authenticate();
     }
-    if (!quickbooksClient.accessToken || !quickbooksClient.realmId) {
+    if (!client.accessToken || !client.realmId) {
       throw new Error('Quickbooks not authenticated');
     }
     return {
-      accessToken: quickbooksClient.accessToken,
-      realmId: quickbooksClient.realmId,
-      isSandbox: quickbooksClient.environment === 'sandbox',
+      accessToken: client.accessToken,
+      realmId: client.realmId,
+      isSandbox: client.environment === 'sandbox',
     };
   }
 
@@ -736,11 +776,17 @@ export class QuickbooksClient {
   }
 }
 
-export const quickbooksClient = new QuickbooksClient({
-  clientId: client_id,
-  clientSecret: client_secret,
-  refreshToken: refresh_token,
-  realmId: realm_id,
-  environment: environment,
-  redirectUri: redirect_uri,
+// The stdio env client under its upstream name (auth-server.ts and tests use
+// it). Fork: a lazy stand-in — the real client is built by getEnvClient() on
+// first property access, not at import. Methods are bound to the real client
+// and property writes go to it, so it behaves like the instance itself.
+export const quickbooksClient: QuickbooksClient = new Proxy({} as QuickbooksClient, {
+  get(_target, prop) {
+    const client = getEnvClient();
+    const value = Reflect.get(client, prop, client);
+    return typeof value === 'function' ? value.bind(client) : value;
+  },
+  set(_target, prop, value) {
+    return Reflect.set(getEnvClient(), prop, value);
+  },
 });

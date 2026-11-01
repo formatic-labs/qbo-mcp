@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Task 6 fix round 1** — `jest.config.js`: the 7 `no-useless-escape` lint errors (single-quoted `\.` in
+  `coveragePathIgnorePatterns`) are fixed by writing `\\.` so the regex keeps a literal dot; ignore set unchanged
+  (same 122 measured files and coverage summary, gate passes), `npm run lint` exits 0 repo-wide. `publish.yml` now runs
+  `npm run lint` before `npm test` and fails unless the tag equals `v` + package.json version.
 - 2026-11-01 — **Publish pipeline and hosted docs (Task 6)** — new `.github/workflows/publish.yml`: on push of a `v*` tag,
   `npm ci` -> `npm test` (pretest builds) -> `npm publish` to GitHub Packages with `GITHUB_TOKEN` (`contents: read`,
   `packages: write`, setup-node `registry-url`/`scope` `@formatic-labs`; actions pinned to the same majors as `ci.yml`).

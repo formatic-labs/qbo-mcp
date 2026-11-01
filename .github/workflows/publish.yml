@@ -22,6 +22,15 @@ jobs:
           registry-url: https://npm.pkg.github.com
           scope: '@formatic-labs'
       - run: npm ci
+      # Fail unless the tag matches package.json (v + version).
+      - name: Check tag matches package version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version v$VERSION" >&2
+            exit 1
+          fi
+      - run: npm run lint
       # `pretest` runs the build, so this also type-checks and builds dist/.
       - run: npm test
       - run: npm publish

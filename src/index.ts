@@ -2,8 +2,7 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { QuickbooksMCPServer } from "./server/qbo-mcp-server.js";
-import { RegisterTool } from "./helpers/register-tool.js";
-import { ALL_TOOLS } from "./tools/catalog.js";
+import { registerQboTools } from "./register-qbo-tools.js";
 import { QuickbooksClient, installProcessErrorLogging, loadTokenStoreEnv } from "./clients/quickbooks-client.js";
 
 const main = async () => {
@@ -19,8 +18,9 @@ const main = async () => {
 
   // Create an MCP server
   const server = QuickbooksMCPServer.GetServer();
-  // Register every tool in the catalog (src/tools/catalog.ts)
-  for (const tool of ALL_TOOLS) RegisterTool(server, tool);
+  // Register every tool in the catalog (src/tools/catalog.ts) with stdio
+  // defaults: all tools, QUICKBOOKS_DISABLE_* honoured, env client.
+  registerQboTools(server);
 
   // Start receiving messages on stdin and sending messages on stdout
   const transport = new StdioServerTransport();

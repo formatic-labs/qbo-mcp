@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **`registerQboTools` with hosted allowlist, write gate and audit hook** — new `src/register-qbo-tools.ts`
+  (`registerQboTools`, `QBO_MESSAGES`, types `RegisterQboToolsOptions` / `QboWriteAuditEvent`). stdio (`src/index.ts`
+  now calls `registerQboTools(server)`) registers the same 142 tools in the same order, `QUICKBOOKS_DISABLE_*` still
+  honoured (checked by listing tools over stdio before and after). `hosted: true` registers only the allowlist
+  (default `HOSTED_TOOL_ALLOWLIST`), never a delete tool, and requires `resolveContext`. Each hosted call resolves
+  `{ client, actor }` from the host's `authInfo`, refuses create/update unless `actor.canWrite`, runs the unchanged
+  handler inside `runWithQboContext` after a token preflight, and maps not-connected / reconnect / token-save /
+  unexpected failures to fixed user copy (no stack, no detail). Every create/update goes to `onWrite` with tool,
+  entity type, entity Id (from the result JSON), `intuit_tid` (from the formatted error) and `ok`; a failing hook is
+  logged by error name only and never changes the response. `RegisterTool` takes an optional `{ wrap }` so the
+  unsupported-parameter warning keeps working in both modes. Why: spec decisions D7 (no deletes hosted), D8 (audit
+  every write), D9 (writes only for owners/admins with a QuickBooks grant).
 - 2026-11-01 — **Request-context review fixes** — (1) `loadTokenStoreEnv()` (new export of `quickbooks-client.ts`)
   loads the token-store `.env` into `process.env`. `src/index.ts` and `src/auth-server.ts` call it at startup, and
   `createEnvClient()` calls it too, so `.env` settings read before the client is built (`QUICKBOOKS_ATTACHABLE_BASE_DIR`,

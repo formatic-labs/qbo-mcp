@@ -112,9 +112,23 @@ export function unsupportedParamsWarning(
   );
 }
 
+/** A registered MCP tool callback: (args, extra) => result. */
+export type ToolHandlerFn = (...a: any[]) => Promise<any>;
+
+/** Fork: optional hooks for RegisterTool (used by registerQboTools). */
+export interface RegisterToolOptions {
+  /**
+   * Wraps the finished handler (outside the unsupported-parameter machinery),
+   * e.g. to resolve a per-call QuickBooks context, gate writes and audit.
+   * The env-based QUICKBOOKS_DISABLE_* check still runs first.
+   */
+  wrap?: (handler: ToolHandlerFn) => ToolHandlerFn;
+}
+
 export function RegisterTool<T extends z.ZodType<any, any>>(
   server: McpServer,
-  toolDefinition: ToolDefinition<T>
+  toolDefinition: ToolDefinition<T>,
+  options: RegisterToolOptions = {}
 ) {
   if (isToolDisabled(toolDefinition.name)) return;
 
@@ -122,7 +136,7 @@ export function RegisterTool<T extends z.ZodType<any, any>>(
   const paramsSchema = permissiveParamsSchema(toolDefinition.schema);
   const baseHandler = toolDefinition.handler as unknown as (...a: any[]) => Promise<any>;
 
-  const handler = (async (...a: any[]) => {
+  const handler: ToolHandlerFn = async (...a: any[]) => {
     let callArgs = a;
     let warning: string | null = null;
     try {
@@ -157,7 +171,8 @@ export function RegisterTool<T extends z.ZodType<any, any>>(
       /* diagnostics must never break a working call */
     }
     return result;
-  }) as typeof toolDefinition.handler;
+  };
 
-  server.tool(toolDefinition.name, toolDefinition.description, { params: paramsSchema }, handler);
+  const finalHandler = (options.wrap ? options.wrap(handler) : handler) as typeof toolDefinition.handler;
+  server.tool(toolDefinition.name, toolDefinition.description, { params: paramsSchema }, finalHandler);
 }

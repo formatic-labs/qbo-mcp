@@ -389,12 +389,20 @@ function makeFakeStore(initial?: Tokens) {
 }
 function makeStoreClient(
   store: ReturnType<typeof makeFakeStore>,
-  overrides: Partial<{ environment: string; refreshToken: string; accessToken: string; accessTokenExpiresAt: Date }> = {}
+  overrides: Partial<{
+    environment: string;
+    refreshToken: string;
+    accessToken: string;
+    accessTokenExpiresAt: Date;
+    strictPersistence: boolean;
+    noRefreshToken: boolean; // build the client with tokenStore only (hosted shape)
+  }> = {}
 ) {
   return new QuickbooksClient({
     clientId: 'test-client-id',
     clientSecret: 'test-client-secret',
-    refreshToken: overrides.refreshToken ?? 'T0',
+    refreshToken: overrides.noRefreshToken ? undefined : overrides.refreshToken ?? 'T0',
+    strictPersistence: overrides.strictPersistence,
     realmId: '12345',
     environment: overrides.environment ?? 'sandbox',
     redirectUri: 'https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl',
@@ -509,9 +517,9 @@ describe('TokenStore: serialized refresh', () => {
     expect(refreshDispatch).toHaveBeenCalledWith('T5');
   });
 
-  it('logs (without failing the refresh) when the store cannot save, and never logs token values', async () => {
+  it('logs (without failing the refresh) when the store cannot save, and never logs token values or the store message', async () => {
     const store = makeFakeStore({ refreshToken: 'T0' });
-    store.save.mockRejectedValueOnce(new Error('disk full'));
+    store.save.mockRejectedValue(new Error('disk full near secret-rt'));
     const client = makeStoreClient(store);
     refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'secret-at', expires_in: 3600, refresh_token: 'secret-rt' } });
     const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -519,8 +527,116 @@ describe('TokenStore: serialized refresh', () => {
     await expect(client.refreshAccessToken()).resolves.toEqual({ access_token: 'secret-at', expires_in: 3600 });
 
     const logged = errSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
-    expect(logged).toMatch(/Failed to persist/);
-    expect(logged).not.toMatch(/secret-at|secret-rt/);
+    expect(logged).toMatch(/Failed to persist refreshed QuickBooks tokens \(Error\)/);
+    expect(logged).not.toMatch(/secret-at|secret-rt|disk full/);
+    expect(store.save).toHaveBeenCalledTimes(3); // rotated: retried (R3)
+  });
+});
+
+describe('TokenStore: client built with tokenStore only (fix round 1, #1)', () => {
+  it('seeds the refresh token from the store and authenticates; never flags reauth', async () => {
+    const store = makeFakeStore({ refreshToken: 'stored-T9' });
+    const client = makeStoreClient(store, { environment: 'production', noRefreshToken: true });
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'at9', expires_in: 3600 } });
+
+    await expect(client.authenticate()).resolves.toBeDefined();
+
+    expect(refreshDispatch.mock.calls).toEqual([['stored-T9']]);
+    expect(store.markReauthRequired).not.toHaveBeenCalled();
+    expect(serverCreated).toBe(false);
+  });
+
+  it('seeds a fresh stored access token too, so no refresh is needed', async () => {
+    const store = makeFakeStore({
+      refreshToken: 'stored-T9',
+      accessToken: 'stored-at',
+      accessTokenExpiresAt: new Date(Date.now() + 30 * 60 * 1000),
+    });
+    const client = makeStoreClient(store, { environment: 'production', noRefreshToken: true });
+
+    await expect(client.authenticate()).resolves.toBeDefined();
+
+    expect(refreshDispatch).not.toHaveBeenCalled();
+    expect(store.markReauthRequired).not.toHaveBeenCalled();
+  });
+
+  it('refreshAccessToken() also seeds from the store', async () => {
+    const store = makeFakeStore({ refreshToken: 'stored-T9' });
+    const client = makeStoreClient(store, { environment: 'production', noRefreshToken: true });
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'at9', expires_in: 3600 } });
+
+    await expect(client.refreshAccessToken()).resolves.toEqual({ access_token: 'at9', expires_in: 3600 });
+    expect(store.markReauthRequired).not.toHaveBeenCalled();
+  });
+
+  it('only flags reauth when the store is empty as well', async () => {
+    const { QboReauthRequiredError } = await import('../../../src/clients/token-store');
+    const store = makeFakeStore(undefined);
+    const client = makeStoreClient(store, { environment: 'production', noRefreshToken: true });
+
+    await expect(client.authenticate()).rejects.toBeInstanceOf(QboReauthRequiredError);
+    expect(store.markReauthRequired).toHaveBeenCalledTimes(1);
+    expect(refreshDispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('TokenStore: persisting a rotated token (fix round 1, #2 / ruling R3)', () => {
+  const rotatedResponse = () => ({ token: { access_token: 'at-r', expires_in: 3600, refresh_token: 'rotated-R' } });
+
+  it('retries the save: fails twice then succeeds -> saved, no error', async () => {
+    const store = makeFakeStore({ refreshToken: 'T0' });
+    store.save.mockRejectedValueOnce(new Error('blip')).mockRejectedValueOnce(new Error('blip'));
+    const client = makeStoreClient(store, { strictPersistence: true });
+    refreshDispatch.mockResolvedValueOnce(rotatedResponse());
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(client.refreshAccessToken()).resolves.toEqual({ access_token: 'at-r', expires_in: 3600 });
+
+    expect(store.save).toHaveBeenCalledTimes(3);
+    expect(store.current?.refreshToken).toBe('rotated-R');
+    expect(errSpy.mock.calls.map((c) => String(c[0])).join('\n')).not.toMatch(/Failed to persist/);
+  });
+
+  it('strictPersistence: always failing -> QboTokenPersistError after 3 attempts, no token values in the message', async () => {
+    const { QboTokenPersistError } = await import('../../../src/clients/token-store');
+    const store = makeFakeStore({ refreshToken: 'T0' });
+    store.save.mockRejectedValue(new Error('db down'));
+    const client = makeStoreClient(store, { strictPersistence: true });
+    refreshDispatch.mockResolvedValueOnce(rotatedResponse());
+
+    const err = await client.authenticate().catch((e) => e);
+
+    expect(err).toBeInstanceOf(QboTokenPersistError);
+    expect((err as Error).name).toBe('QboTokenPersistError');
+    expect((err as Error).message).toMatch(/after 3 attempts/);
+    expect((err as Error).message).not.toMatch(/rotated-R|at-r|T0|db down/);
+    expect(store.save).toHaveBeenCalledTimes(3);
+  });
+
+  it('default (stdio): always failing -> logs and returns the access token after 3 attempts', async () => {
+    const store = makeFakeStore({ refreshToken: 'T0' });
+    store.save.mockRejectedValue(new Error('read-only fs'));
+    const client = makeStoreClient(store);
+    refreshDispatch.mockResolvedValueOnce(rotatedResponse());
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(client.refreshAccessToken()).resolves.toEqual({ access_token: 'at-r', expires_in: 3600 });
+
+    expect(store.save).toHaveBeenCalledTimes(3);
+    expect(errSpy.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/Failed to persist refreshed QuickBooks tokens \(Error\)/);
+  });
+
+  it('a non-rotated save failure is tried once and only logged, even with strictPersistence', async () => {
+    const store = makeFakeStore({ refreshToken: 'T0' });
+    store.save.mockRejectedValue('not-an-error-object');
+    const client = makeStoreClient(store, { strictPersistence: true });
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'at-n', expires_in: 3600, refresh_token: 'T0' } });
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(client.refreshAccessToken()).resolves.toEqual({ access_token: 'at-n', expires_in: 3600 });
+
+    expect(store.save).toHaveBeenCalledTimes(1);
+    expect(errSpy.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/Failed to persist refreshed QuickBooks tokens \(string\)/);
   });
 });
 

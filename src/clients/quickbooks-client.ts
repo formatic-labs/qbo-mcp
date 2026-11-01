@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import open from 'open';
 import { decryptSecret } from '../helpers/token-crypto.js';
 import { EnvFileTokenStore } from './env-file-token-store.js';
-import { QboReauthRequiredError, type StoredQboTokens, type TokenStore } from './token-store.js';
+import { QboReauthRequiredError, QboTokenPersistError, type TokenStore } from './token-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -106,6 +106,13 @@ export class QuickbooksClient {
   // Supabase-backed store whose lock spans serverless instances.
   private readonly tokenStore: TokenStore;
 
+  // Fork (ruling R3): when true, a rotated refresh token that cannot be saved
+  // after SAVE_ATTEMPTS tries fails the refresh with QboTokenPersistError
+  // (hosted: the store is the only durable copy). False (stdio default) keeps
+  // the log-only behaviour; the in-memory token still serves this process.
+  private readonly strictPersistence: boolean;
+  private static readonly SAVE_ATTEMPTS = 3;
+
   constructor(config: {
     clientId: string;
     clientSecret: string;
@@ -118,6 +125,8 @@ export class QuickbooksClient {
     /** Seed with a stored access token so a fresh one is used without a refresh. */
     accessToken?: string;
     accessTokenExpiresAt?: Date;
+    /** Throw QboTokenPersistError when a rotated refresh token can't be saved (hosted). Default false. */
+    strictPersistence?: boolean;
   }) {
     this.clientId = config.clientId;
     this.clientSecret = config.clientSecret;
@@ -128,6 +137,7 @@ export class QuickbooksClient {
     this.tokenStore = config.tokenStore ?? new EnvFileTokenStore(TOKEN_STORE_PATH);
     this.accessToken = config.accessToken;
     this.accessTokenExpiry = config.accessTokenExpiresAt;
+    this.strictPersistence = config.strictPersistence ?? false;
     this.oauthClient = new OAuthClient({
       clientId: this.clientId,
       clientSecret: this.clientSecret,
@@ -368,11 +378,7 @@ export class QuickbooksClient {
             // Save tokens (the .env store also records the realm id).
             this.refreshToken = tokens.refresh_token;
             this.realmId = tokens.realmId;
-            const signedIn: StoredQboTokens & { realmId?: string } = {
-              refreshToken: tokens.refresh_token,
-              realmId: tokens.realmId,
-            };
-            await this.tokenStore.save(signedIn);
+            await this.tokenStore.save({ refreshToken: tokens.refresh_token, realmId: tokens.realmId });
 
             // Send success response
             res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -508,19 +514,37 @@ export class QuickbooksClient {
     // so other instances can reuse it instead of refreshing again.
     const rotated = !!token.refresh_token && token.refresh_token !== used;
     this.refreshToken = token.refresh_token || used;
-    try {
-      await this.tokenStore.save({
-        refreshToken: this.refreshToken,
-        accessToken: this.accessToken,
-        accessTokenExpiresAt: this.accessTokenExpiry,
-      });
+    // A rotated token is the only copy once the old one is spent, so retry its
+    // save (still inside the lock) before giving up (ruling R3).
+    const attempts = rotated ? QuickbooksClient.SAVE_ATTEMPTS : 1;
+    let persistErr: unknown;
+    let saved = false;
+    for (let attempt = 1; attempt <= attempts && !saved; attempt++) {
+      try {
+        await this.tokenStore.save({
+          refreshToken: this.refreshToken,
+          accessToken: this.accessToken,
+          accessTokenExpiresAt: this.accessTokenExpiry,
+        });
+        saved = true;
+      } catch (err) {
+        persistErr = err;
+      }
+    }
+    if (saved) {
       if (rotated) console.error('[qbo-client] Refresh token rotated and persisted to the token store');
-    } catch (persistErr) {
-      // Don't fail the whole refresh just because we couldn't persist; the
-      // in-memory token is still valid for this process. Log the error's
-      // message only — never token values.
-      const reason = persistErr instanceof Error ? persistErr.message : String(persistErr);
-      console.error(`[qbo-client] Failed to persist refreshed QuickBooks tokens: ${reason}`);
+    } else {
+      if (rotated && this.strictPersistence) {
+        throw new QboTokenPersistError(
+          `Could not save the rotated QuickBooks refresh token after ${attempts} attempts; ` +
+            'this company may need to reconnect QuickBooks.'
+        );
+      }
+      // Log-only (stdio default): the in-memory token is still valid for this
+      // process. Fixed text plus the error's name only: never its message
+      // (a store could put anything there) and never token values.
+      const errName = persistErr instanceof Error ? persistErr.name : typeof persistErr;
+      console.error(`[qbo-client] Failed to persist refreshed QuickBooks tokens (${errName})`);
     }
 
     // Surface the refresh token's own remaining lifetime for observability.
@@ -540,7 +564,23 @@ export class QuickbooksClient {
     };
   }
 
+  // Fork: a client built with only a tokenStore (the hosted connector) starts
+  // with no in-memory refresh token. Load it (and a stored access token, if
+  // any) before treating the company as unauthenticated, so a valid stored
+  // token is never mistaken for "reconnect required".
+  private async seedFromStore(): Promise<void> {
+    if (this.refreshToken) return;
+    const stored = await this.tokenStore.read();
+    if (!stored) return;
+    this.refreshToken = stored.refreshToken;
+    if (stored.accessToken && stored.accessTokenExpiresAt) {
+      this.accessToken = stored.accessToken;
+      this.accessTokenExpiry = stored.accessTokenExpiresAt;
+    }
+  }
+
   async refreshAccessToken() {
+    await this.seedFromStore();
     if (!this.refreshToken) {
       await this.startOAuthFlow();
 
@@ -562,6 +602,8 @@ export class QuickbooksClient {
         // dedupes callers within this client.
         return await this.tokenStore.withRefreshLock(() => this.refreshUnderLock());
       } catch (error: unknown) {
+        // A persistence failure is not a refresh failure: surface it as-is.
+        if (error instanceof QboTokenPersistError) throw error;
         const message = error instanceof Error ? error.message : String(error);
         // Preserve the original error as `cause` so the caller can classify it
         // (auth-invalidation vs transient) without re-parsing the message.
@@ -585,6 +627,7 @@ export class QuickbooksClient {
 
     this.authInFlight = (async () => {
       try {
+        await this.seedFromStore();
         if (!this.refreshToken || !this.realmId) {
           await this.startOAuthFlow();
 
@@ -621,8 +664,12 @@ export class QuickbooksClient {
             this.refreshToken = undefined;
             this.accessToken = undefined;
             this.accessTokenExpiry = undefined;
-            // With no refresh token, refreshAccessToken() starts the OAuth
-            // flow and then exchanges the newly obtained refresh token.
+            // Start the OAuth flow directly (refreshAccessToken() would re-seed
+            // the dead token from the store), then exchange the new token.
+            await this.startOAuthFlow();
+            if (!this.refreshToken) {
+              throw new Error('Failed to obtain refresh token from OAuth flow');
+            }
             await this.refreshAccessToken();
           }
         }

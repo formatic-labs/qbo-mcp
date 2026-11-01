@@ -36,11 +36,10 @@ export class EnvFileTokenStore implements TokenStore {
   }
 
   /**
-   * Persist the refresh token. `realmId` is accepted for the interactive
-   * sign-in (`npm run auth`), which also learns the company id; the hosted
-   * store ignores it (the realm is its key).
+   * Persist the refresh token, plus `realmId` when the interactive sign-in
+   * (`npm run auth`) supplies it. Access tokens are not written.
    */
-  async save(tokens: StoredQboTokens & { realmId?: string }): Promise<void> {
+  async save(tokens: StoredQboTokens): Promise<void> {
     // Only rotations (or a sign-in) rewrite the file, matching the old
     // saveTokensToEnv call sites — the hourly access-token refresh doesn't.
     if (!tokens.realmId && this.readRefreshToken() === tokens.refreshToken) return;

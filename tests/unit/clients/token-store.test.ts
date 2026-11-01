@@ -29,7 +29,7 @@ jest.unstable_mockModule('../../../src/helpers/token-crypto', () => ({
 }));
 
 const { EnvFileTokenStore } = await import('../../../src/clients/env-file-token-store');
-const { QboReauthRequiredError } = await import('../../../src/clients/token-store');
+const { QboReauthRequiredError, QboTokenPersistError } = await import('../../../src/clients/token-store');
 
 let dir: string;
 let envPath: string;
@@ -53,6 +53,15 @@ describe('QboReauthRequiredError', () => {
     expect(err).toBeInstanceOf(QboReauthRequiredError);
     expect(err.name).toBe('QboReauthRequiredError');
     expect(err.message).toBe('reconnect QuickBooks');
+  });
+});
+
+describe('QboTokenPersistError', () => {
+  it('is an Error with its own name', () => {
+    const err = new QboTokenPersistError('could not save');
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe('QboTokenPersistError');
+    expect(err.message).toBe('could not save');
   });
 });
 

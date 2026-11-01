@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the browser flow, whose stdout output corrupted the MCP stream ("Connection closed").
 
 ### Changed
+- 2026-11-01 — **TokenStore review fixes.**
+  - A client built with only `tokenStore` (no `refreshToken`) now loads the refresh token, and a stored access token, from the store before treating the company as signed out. Before, it went straight to the "reconnect" path and wrongly called `markReauthRequired`. The sandbox dead-token fallback now starts the browser sign-in directly, so it doesn't reload the dead token from the store.
+  - Ruling R3: when the refresh token rotated, the save is retried up to 3 times inside the lock. With the new client option `strictPersistence: true` (for hosted use), a final failure throws the new `QboTokenPersistError` from `token-store.ts`; its message contains no token values. The default (`false`, stdio) still only logs.
+  - The persist-failure log is now fixed text plus the error's name. It no longer includes the store's error message.
+  - `StoredQboTokens` gains the documented, optional `realmId?` field (set only by the `npm run auth` sign-in).
+  - Why: a hosted company with a valid stored token must never be flagged for reauth. In hosted use the store holds the only copy of a rotated refresh token, so a failed save can't be silently dropped there.
 - 2026-11-01 — **QuickBooks tokens persist through a TokenStore with a refresh lock.** New
   `src/clients/token-store.ts` (`StoredQboTokens`, `TokenStore` with read/save/withRefreshLock/markReauthRequired,
   `QboReauthRequiredError`) and `src/clients/env-file-token-store.ts` (`EnvFileTokenStore(path)`: the `.env`

@@ -10,11 +10,17 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { registerQboTools, type RegisterQboToolsOptions } from "../register-qbo-tools.js";
 import { enterHostedMode } from "../context/qbo-context.js";
+import { HOSTED_TOOL_ALLOWLIST } from "../tools/catalog.js";
 
 export interface QboHostedOptions extends Omit<RegisterQboToolsOptions, "hosted" | "tools"> {
   /** Resolves the caller's company client and actor for one call. */
   resolveContext: NonNullable<RegisterQboToolsOptions["resolveContext"]>;
-  /** Tool names to expose. Default: HOSTED_TOOL_ALLOWLIST. Delete tools are never exposed. */
+  /**
+   * Tool names to expose. Default: HOSTED_TOOL_ALLOWLIST. Must be a subset of it:
+   * the allowlist is the ceiling, widened only by editing HOSTED_TOOL_ALLOWLIST in
+   * this package. Any other name makes handleQboMcpRequest reject. Delete tools are
+   * never exposed.
+   */
   tools?: readonly string[];
 }
 
@@ -28,6 +34,13 @@ export async function handleQboMcpRequest(
   // client is unreachable and a missing context fails closed.
   enterHostedMode();
 
+  if (options.tools) {
+    const extra = options.tools.filter((n) => !HOSTED_TOOL_ALLOWLIST.includes(n));
+    if (extra.length) {
+      throw new Error(`handleQboMcpRequest: tools not in HOSTED_TOOL_ALLOWLIST: ${extra.join(", ")}`);
+    }
+  }
+
   const server = new McpServer({ name: "qbo-mcp", version: "0.1.0" });
   registerQboTools(server, { ...options, hosted: true });
 
@@ -35,6 +48,12 @@ export async function handleQboMcpRequest(
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
   });
-  await server.connect(transport);
-  return transport.handleRequest(request, { authInfo });
+  try {
+    await server.connect(transport);
+    return await transport.handleRequest(request, { authInfo });
+  } finally {
+    // Per-request teardown (stateless: nothing outlives the request). The JSON
+    // response is already built when handleRequest resolves, so closing is safe.
+    await server.close();
+  }
 }

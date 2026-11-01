@@ -9,6 +9,8 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { handleQboMcpRequest } from '../../../src/hosted/handle-request';
 import { HOSTED_TOOL_ALLOWLIST } from '../../../src/tools/catalog';
 import { isHostedMode } from '../../../src/context/qbo-context';
@@ -94,6 +96,48 @@ describe('handleQboMcpRequest', () => {
     const { ctx } = fakeContext();
     const res = await handleQboMcpRequest(rpc(initBody), authInfo, { resolveContext: async () => ctx });
     expect(res.headers.get('mcp-session-id')).toBeNull();
+  });
+});
+
+describe('handleQboMcpRequest hardening', () => {
+  it('rejects tools outside HOSTED_TOOL_ALLOWLIST, naming them', async () => {
+    const { ctx } = fakeContext();
+    await expect(
+      handleQboMcpRequest(rpc(initBody), authInfo, {
+        resolveContext: async () => ctx,
+        tools: ['get_company_info', 'create_invoice'],
+      }),
+    ).rejects.toThrow(/create_invoice/);
+  });
+
+  it('closes the server once per request and leaves the response body intact', async () => {
+    const spy = jest.spyOn(McpServer.prototype, 'close');
+    try {
+      const { ctx } = fakeContext();
+      const res = await handleQboMcpRequest(rpc(initBody), authInfo, { resolveContext: async () => ctx });
+      expect(spy).toHaveBeenCalledTimes(1);
+      const body: any = await res.json();
+      expect(body.result.serverInfo.name).toBe('qbo-mcp');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('closes the server when handleRequest throws', async () => {
+    const close = jest.spyOn(McpServer.prototype, 'close');
+    const hr = jest
+      .spyOn(WebStandardStreamableHTTPServerTransport.prototype, 'handleRequest')
+      .mockRejectedValue(new Error('boom'));
+    try {
+      const { ctx } = fakeContext();
+      await expect(
+        handleQboMcpRequest(rpc(initBody), authInfo, { resolveContext: async () => ctx }),
+      ).rejects.toThrow('boom');
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      hr.mockRestore();
+      close.mockRestore();
+    }
   });
 });
 

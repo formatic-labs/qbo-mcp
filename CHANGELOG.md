@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Hosted handler review fixes (Task 5)** — (1) `handleQboMcpRequest` now closes its per-request
+  `McpServer`/transport in a `finally`, including when `handleRequest` throws; the already-built JSON response is
+  unaffected. (2) Ruling R5: `options.tools` must be a subset of `HOSTED_TOOL_ALLOWLIST`; any other name rejects with
+  an error naming the extra tools (the allowlist is the ceiling, widened by editing it in this package). (3)
+  `pretest` runs `npm run build` so the dist-based side-effect test works on a clean checkout.
 - 2026-11-01 — **Web-standard hosted handler and `@formatic-labs/qbo-mcp` package entry** — new
   `src/hosted/handle-request.ts`: `handleQboMcpRequest(request, authInfo, { resolveContext, tools?, onWrite? })`
   builds a fresh `McpServer` + `WebStandardStreamableHTTPServerTransport` (stateless, JSON responses) per request,

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Behaviour note: stdio missing credentials** — the stdio server no longer crashes at startup when
+  `QUICKBOOKS_CLIENT_ID` / `QUICKBOOKS_CLIENT_SECRET` / redirect URI are missing: the env client is now built lazily
+  on the first tool call, so the server starts, lists its tools, and each tool call reports the missing credentials
+  instead. Why: a side effect of making the library import side-effect free (lazy env client), recorded per the final
+  review.
 - 2026-11-01 — **Final review fixes: hosted entry points, missing realmId, save backoff** — (1) Ruling R9: a hosted
   `QuickbooksClient` built without `realmId` now throws the new exported `QboConfigError` ("QuickBooks client is
   missing its company (realmId); pass realmId from the integration row.") at construction, and the hosted OAuth path

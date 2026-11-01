@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Task 7 fix round 1 (docs)** — ProjectPix handoff: install guidance now local `npm pack`/`npm link`, deploys wait for the published 0.1.0 via `NPM_RC` (no git-token path); states QBO grant storage is APP's call, default QBO roles, proposed 1-year audit retention, and WEB's dependency on APP's connect-URL/status endpoints; adds session-start briefing line and full spec source paths. Why: review ruling R8.
 - 2026-11-01 — **ProjectPix handoff and HomeWatch pointer (Task 7, docs only)** — new
   `docs/handoffs/2026-11-01-projectpix-qbo-connector.md` (decisions for the ProjectPix APP master session: migration,
   Vault storage, QBO grant, Intuit callback, `/api/v1/qbo/mcp` route, Vault `TokenStore` with a session-level refresh

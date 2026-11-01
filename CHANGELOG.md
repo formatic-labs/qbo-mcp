@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Web-standard hosted handler and `@formatic-labs/qbo-mcp` package entry** — new
+  `src/hosted/handle-request.ts`: `handleQboMcpRequest(request, authInfo, { resolveContext, tools?, onWrite? })`
+  builds a fresh `McpServer` + `WebStandardStreamableHTTPServerTransport` (stateless, JSON responses) per request,
+  registers the hosted tools and passes `authInfo` through to `resolveContext`. It calls `enterHostedMode()` itself
+  (idempotent) before anything else, so a host cannot forget it. New `src/lib.ts` is the side-effect-free package entry
+  (re-exports only; the stdio bin `src/index.ts` is never imported from it; checked in a fresh process). `package.json`:
+  name `@formatic-labs/qbo-mcp`, version `0.1.0`, `main`/`types`/`exports` -> `dist/lib.*`, `bin` unchanged,
+  `publishConfig` -> `https://npm.pkg.github.com`, `repository` -> `formatic-labs/qbo-mcp`; `tsconfig.json` emits
+  declarations; `package-lock.json` root name follows. Why: ProjectPix's Next.js route authenticates the caller and returns this handler's `Response` as-is.
 - 2026-11-01 — **`registerQboTools` with hosted allowlist, write gate and audit hook** — new `src/register-qbo-tools.ts`
   (`registerQboTools`, `QBO_MESSAGES`, types `RegisterQboToolsOptions` / `QboWriteAuditEvent`). stdio (`src/index.ts`
   now calls `registerQboTools(server)`) registers the same 142 tools in the same order, `QUICKBOOKS_DISABLE_*` still

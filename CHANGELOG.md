@@ -46,6 +46,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the browser flow, whose stdout output corrupted the MCP stream ("Connection closed").
 
 ### Changed
+- 2026-11-01 — **QuickBooks tokens persist through a TokenStore with a refresh lock.** New
+  `src/clients/token-store.ts` (`StoredQboTokens`, `TokenStore` with read/save/withRefreshLock/markReauthRequired,
+  `QboReauthRequiredError`) and `src/clients/env-file-token-store.ts` (`EnvFileTokenStore(path)`: the `.env`
+  read/write that used to live in `QuickbooksClient`, moved over with the same behaviour: DPAPI, atomic write,
+  symlink write-through, file rewritten only when the refresh token rotates or on sign-in; in-process mutex per
+  path; `markReauthRequired` is a no-op, per ruling R1). `QuickbooksClient` takes `tokenStore?` (default
+  `EnvFileTokenStore` at the token-store path) and `accessToken?`/`accessTokenExpiresAt?` seeds. It now refreshes
+  inside `withRefreshLock`: it re-reads the store, uses a still-fresh stored access token without refreshing,
+  otherwise refreshes with the stored refresh token (retrying once with the in-memory token if that is rejected),
+  and saves the refresh token, access token and expiry. A dead or missing token calls `markReauthRequired` and
+  throws `QboReauthRequiredError` with the same message text as before ("run `npm run auth`" for stdio, "re-authorize"
+  for production). Why: QuickBooks refresh tokens rotate, and the hosted connector (serverless, many companies) needs
+  refreshes serialized across instances. Supabase Vault + a row lock will sit behind the same interface. Verified
+  with the crm-estimating sandbox smoke test.
 - `.gitignore`: `.env.production`, `.env.sandbox`, `logs/`.
 
 ## [0.0.1] - 2024-01-13

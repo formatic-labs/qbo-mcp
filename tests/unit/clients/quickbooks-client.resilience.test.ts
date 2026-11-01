@@ -6,10 +6,10 @@
  * 1. Multi-process refresh-token rotation race. A host may spawn this server
  *    more than once against the same .env (Claude Desktop + Claude Code), and
  *    Intuit invalidates the previous refresh token on every rotation. The
- *    client refreshes with its in-memory token first and only consults .env
- *    AFTER that token is rejected, retrying once with a sibling's freshly
- *    persisted token — so a valid in-memory token (including one just rotated
- *    but not yet persisted) is never discarded.
+ *    client refreshes inside the token store's lock with the store's newest
+ *    persisted token, and retries once with its in-memory token if that is
+ *    rejected — so a valid in-memory token (including one just rotated but not
+ *    yet persisted) is never discarded.
  * 2. In production, a genuinely dead refresh token fails with an actionable
  *    "re-authorize" error rather than opening the interactive localhost OAuth
  *    flow (Intuit rejects localhost redirects for production apps). A TRANSIENT
@@ -163,59 +163,61 @@ beforeEach(() => {
 });
 
 describe('multi-process rotation race', () => {
-  it('does not consult .env when the in-memory token is valid (never discards a good token)', async () => {
+  // Task 2: the refresh now runs inside the token store's lock and tries the
+  // store's (newest persisted) refresh token FIRST, falling back to the
+  // in-memory token only when the stored one is rejected. The guarantees these
+  // tests pin are unchanged: a valid in-memory token is never discarded, a
+  // transient error never swaps tokens, and disk values parse like dotenv.
+  it('falls back to the valid in-memory token when the stale disk token is rejected (never discards a good token)', async () => {
     // Regression guard: disk holds a STALE token (a prior persist failed), but
-    // the in-memory token is valid. The refresh must use memory and not touch
-    // disk — the pre-review bug adopted disk unconditionally and locked out a
-    // company whose valid token was in memory.
+    // the in-memory token is valid. The pre-review bug adopted disk
+    // unconditionally and locked out a company whose valid token was in memory.
     const client = makeClient({ refreshToken: 'valid-in-memory-T2' });
     fsReadFileSync.mockReturnValue(envWithToken('stale-disk-T1'));
-    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'a1', expires_in: 3600 } });
+    refreshDispatch.mockImplementation(async (t) => {
+      if (t === 'stale-disk-T1') throw deadTokenError(400);
+      return { token: { access_token: 'a1', expires_in: 3600 } };
+    });
 
     await client.refreshAccessToken();
 
-    expect(refreshDispatch).toHaveBeenCalledTimes(1);
-    expect(refreshDispatch).toHaveBeenCalledWith('valid-in-memory-T2');
-    expect(fsReadFileSync).not.toHaveBeenCalled(); // disk only consulted on failure
+    expect(refreshDispatch.mock.calls).toEqual([['stale-disk-T1'], ['valid-in-memory-T2']]);
+    expect(tokenOf(client)).toBe('valid-in-memory-T2');
   });
 
-  it('retries with a sibling-rotated disk token after the in-memory token is REJECTED', async () => {
+  it('uses the sibling-rotated disk token first, without spending the stale in-memory one', async () => {
     const client = makeClient({ refreshToken: 'stale-A' });
     fsReadFileSync.mockReturnValue(envWithToken('fresh-B')); // sibling rotated & persisted
-    refreshDispatch
-      .mockRejectedValueOnce(deadTokenError(400)) // stale-A rejected (real shape)
-      .mockResolvedValueOnce({ token: { access_token: 'a2', expires_in: 3600 } }); // fresh-B works
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'a2', expires_in: 3600 } });
 
     await client.refreshAccessToken();
 
-    expect(refreshDispatch.mock.calls).toEqual([['stale-A'], ['fresh-B']]);
+    expect(refreshDispatch.mock.calls).toEqual([['fresh-B']]);
+    expect(tokenOf(client)).toBe('fresh-B');
   });
 
   it('does NOT swap the in-memory token on a TRANSIENT first error (never discards a valid token)', async () => {
     // Regression guard for the second-pass blocker: a transient blip must not
-    // cause a disk re-read that could replace a valid (rotated-but-unpersisted)
-    // in-memory token with a stale disk one.
+    // replace a valid (rotated-but-unpersisted) in-memory token, nor trigger a
+    // retry with another token.
     const client = makeClient({ refreshToken: 'valid-T3' });
     fsReadFileSync.mockReturnValue(envWithToken('stale-disk-T2'));
     refreshDispatch.mockRejectedValueOnce(transientError(503));
 
     await expect(client.refreshAccessToken()).rejects.toThrow(/Failed to refresh Quickbooks token/);
     expect(refreshDispatch).toHaveBeenCalledTimes(1); // no retry
-    expect(fsReadFileSync).not.toHaveBeenCalled(); // disk never consulted on a transient error
     expect(tokenOf(client)).toBe('valid-T3'); // token preserved
   });
 
-  it('parses a quoted disk token like dotenv when falling back', async () => {
+  it('parses a quoted disk token like dotenv', async () => {
     const client = makeClient({ refreshToken: 'dead-A' });
     fsReadFileSync.mockReturnValue('QUICKBOOKS_REFRESH_TOKEN="fresh-B" # rotated\n'); // quoted + comment
-    refreshDispatch
-      .mockRejectedValueOnce(deadTokenError(400))
-      .mockResolvedValueOnce({ token: { access_token: 'a', expires_in: 3600 } });
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'a', expires_in: 3600 } });
 
     await client.refreshAccessToken();
 
-    // Quotes and inline comment stripped: retry uses fresh-B, not '"fresh-B"...'.
-    expect(refreshDispatch).toHaveBeenLastCalledWith('fresh-B');
+    // Quotes and inline comment stripped: the refresh uses fresh-B, not '"fresh-B"...'.
+    expect(refreshDispatch.mock.calls).toEqual([['fresh-B']]);
   });
 
   it('gives up when the disk token is unchanged after a rejection (token genuinely dead)', async () => {
@@ -355,5 +357,226 @@ describe('sandbox transient handling', () => {
     ]);
     expect(started).toBe(true);
     expect(serverCreated).toBe(true);
+  });
+});
+
+// ── TokenStore integration (Task 2) ──────────────────────────────────────────
+// A fake TokenStore with a REAL async mutex, standing in for the hosted
+// Supabase store (row lock) so cross-client serialization is observable.
+type Tokens = { refreshToken: string; accessToken?: string; accessTokenExpiresAt?: Date };
+function makeFakeStore(initial?: Tokens) {
+  let current: Tokens | undefined = initial;
+  let tail: Promise<void> = Promise.resolve();
+  const store = {
+    read: jest.fn(async () => (current ? { ...current } : undefined)),
+    save: jest.fn(async (t: Tokens) => {
+      current = { ...t };
+    }),
+    withRefreshLock: jest.fn(<T>(fn: () => Promise<T>): Promise<T> => {
+      const run = tail.then(fn);
+      tail = run.then(
+        () => undefined,
+        () => undefined
+      );
+      return run;
+    }),
+    markReauthRequired: jest.fn(async (_reason: string) => undefined),
+    get current() {
+      return current;
+    },
+  };
+  return store;
+}
+function makeStoreClient(
+  store: ReturnType<typeof makeFakeStore>,
+  overrides: Partial<{ environment: string; refreshToken: string; accessToken: string; accessTokenExpiresAt: Date }> = {}
+) {
+  return new QuickbooksClient({
+    clientId: 'test-client-id',
+    clientSecret: 'test-client-secret',
+    refreshToken: overrides.refreshToken ?? 'T0',
+    realmId: '12345',
+    environment: overrides.environment ?? 'sandbox',
+    redirectUri: 'https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl',
+    // jest.fn() erases withRefreshLock's generic, so cast to the config's store type.
+    tokenStore: store as unknown as ConstructorParameters<typeof QuickbooksClient>[0]['tokenStore'],
+    accessToken: overrides.accessToken,
+    accessTokenExpiresAt: overrides.accessTokenExpiresAt,
+  });
+}
+
+describe('TokenStore: serialized refresh', () => {
+  it('refresh is serialized through the store lock: one network refresh, second client reuses the saved token', async () => {
+    const store = makeFakeStore({ refreshToken: 'T0' });
+    const a = makeStoreClient(store);
+    const b = makeStoreClient(store);
+    refreshDispatch.mockImplementation(async (t: string) => {
+      await new Promise((r) => setImmediate(r)); // hold the lock across a tick
+      return { token: { access_token: `at-from-${t}`, expires_in: 3600, refresh_token: 'T1' } };
+    });
+
+    await Promise.all([a.authenticate(), b.authenticate()]);
+
+    expect(refreshDispatch).toHaveBeenCalledTimes(1);
+    expect(refreshDispatch).toHaveBeenCalledWith('T0');
+    expect(store.withRefreshLock).toHaveBeenCalledTimes(2);
+    // b re-read the store inside the lock and adopted a's rotated tokens.
+    expect(tokenOf(b)).toBe('T1');
+    expect((b as unknown as { accessToken?: string }).accessToken).toBe('at-from-T0');
+    expect(store.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('rotated refresh token and access token are saved after refresh', async () => {
+    const store = makeFakeStore({ refreshToken: 'T0' });
+    const client = makeStoreClient(store);
+    refreshDispatch.mockResolvedValueOnce({
+      token: { access_token: 'new-at', expires_in: 3600, refresh_token: 'rotated-T1' },
+    });
+    const before = Date.now();
+
+    await client.authenticate();
+
+    expect(store.save).toHaveBeenCalledTimes(1);
+    const saved = store.save.mock.calls[0][0] as Tokens;
+    expect(saved.refreshToken).toBe('rotated-T1');
+    expect(saved.accessToken).toBe('new-at');
+    expect(saved.accessTokenExpiresAt).toBeInstanceOf(Date);
+    expect(saved.accessTokenExpiresAt!.getTime()).toBeGreaterThanOrEqual(before + 3600_000);
+    expect(tokenOf(client)).toBe('rotated-T1');
+  });
+
+  it('saves the access token even when Intuit does not rotate the refresh token', async () => {
+    const store = makeFakeStore({ refreshToken: 'T0' });
+    const client = makeStoreClient(store);
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'at-only' } }); // no expires_in, no rotation
+
+    await client.authenticate();
+
+    const saved = store.save.mock.calls[0][0] as Tokens;
+    expect(saved).toEqual({ refreshToken: 'T0', accessToken: 'at-only', accessTokenExpiresAt: expect.any(Date) });
+  });
+
+  it('fresh stored access token skips refresh (seeded 30 min ahead)', async () => {
+    const store = makeFakeStore({ refreshToken: 'T0' });
+    const client = makeStoreClient(store, {
+      accessToken: 'seeded-at',
+      accessTokenExpiresAt: new Date(Date.now() + 30 * 60 * 1000),
+    });
+
+    await client.authenticate();
+
+    expect(refreshDispatch).not.toHaveBeenCalled();
+    expect(store.withRefreshLock).not.toHaveBeenCalled();
+    expect(store.save).not.toHaveBeenCalled();
+  });
+
+  it('a fresh access token already in the store (saved by another instance) is adopted inside the lock without a refresh', async () => {
+    const expiresAt = new Date(Date.now() + 40 * 60 * 1000);
+    const store = makeFakeStore({ refreshToken: 'T5', accessToken: 'sibling-at', accessTokenExpiresAt: expiresAt });
+    const client = makeStoreClient(store, { refreshToken: 'T4' }); // in-memory token is stale
+
+    const result = await client.refreshAccessToken();
+
+    expect(refreshDispatch).not.toHaveBeenCalled();
+    expect(result.access_token).toBe('sibling-at');
+    expect(result.expires_in).toBeGreaterThan(30 * 60);
+    expect(tokenOf(client)).toBe('T5');
+    expect(store.save).not.toHaveBeenCalled();
+  });
+
+  it('an expiring access token in the store is not adopted; the stored refresh token is used', async () => {
+    const store = makeFakeStore({
+      refreshToken: 'T5',
+      accessToken: 'old-at',
+      accessTokenExpiresAt: new Date(Date.now() + 60 * 1000), // inside the 5-min buffer
+    });
+    const client = makeStoreClient(store, { refreshToken: 'T4' });
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'fresh-at', expires_in: 3600, refresh_token: 'T6' } });
+
+    await client.refreshAccessToken();
+
+    expect(refreshDispatch.mock.calls).toEqual([['T5']]);
+    expect(store.current?.refreshToken).toBe('T6');
+  });
+
+  it('a store access token without an expiry is treated as stale', async () => {
+    const store = makeFakeStore({ refreshToken: 'T5', accessToken: 'no-expiry-at' });
+    const client = makeStoreClient(store);
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'fresh-at', expires_in: 3600 } });
+
+    await client.refreshAccessToken();
+
+    expect(refreshDispatch).toHaveBeenCalledWith('T5');
+  });
+
+  it('logs (without failing the refresh) when the store cannot save, and never logs token values', async () => {
+    const store = makeFakeStore({ refreshToken: 'T0' });
+    store.save.mockRejectedValueOnce(new Error('disk full'));
+    const client = makeStoreClient(store);
+    refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'secret-at', expires_in: 3600, refresh_token: 'secret-rt' } });
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(client.refreshAccessToken()).resolves.toEqual({ access_token: 'secret-at', expires_in: 3600 });
+
+    const logged = errSpy.mock.calls.map((c) => c.map(String).join(' ')).join('\n');
+    expect(logged).toMatch(/Failed to persist/);
+    expect(logged).not.toMatch(/secret-at|secret-rt/);
+  });
+});
+
+describe('TokenStore: dead refresh token', () => {
+  it('dead refresh token calls markReauthRequired and throws QboReauthRequiredError (production, invalid_grant)', async () => {
+    const { QboReauthRequiredError } = await import('../../../src/clients/token-store');
+    const store = makeFakeStore({ refreshToken: 'dead' });
+    const client = makeStoreClient(store, { environment: 'production', refreshToken: 'dead' });
+    refreshDispatch.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 400'), { error: 'invalid_grant', error_description: '' })
+    );
+
+    const err = await client.authenticate().catch((e) => e);
+
+    expect(err).toBeInstanceOf(QboReauthRequiredError);
+    expect((err as Error).message).toMatch(/cannot be renewed automatically in production/);
+    expect(store.markReauthRequired).toHaveBeenCalledTimes(1);
+    expect(String(store.markReauthRequired.mock.calls[0][0])).not.toMatch(/dead/); // no token in the reason
+    expect(serverCreated).toBe(false);
+  });
+
+  it('stdio (interactive disabled): keeps the "run `npm run auth`" wording, as a QboReauthRequiredError (ruling R1)', async () => {
+    const { QboReauthRequiredError } = await import('../../../src/clients/token-store');
+    const store = makeFakeStore({ refreshToken: 'dead-sbx' });
+    const client = makeStoreClient(store, { environment: 'sandbox', refreshToken: 'dead-sbx' });
+    refreshDispatch.mockRejectedValue(deadTokenError(400));
+    QuickbooksClient.interactiveAuthAllowed = false;
+    try {
+      const err = await client.authenticate().catch((e) => e);
+      expect(err).toBeInstanceOf(QboReauthRequiredError);
+      expect((err as Error).message).toMatch(/Reconnect by running `npm run auth` in the qbo-mcp folder/);
+      expect(store.markReauthRequired).toHaveBeenCalledTimes(1);
+      expect(serverCreated).toBe(false);
+    } finally {
+      QuickbooksClient.interactiveAuthAllowed = true;
+    }
+  });
+
+  it('a failing markReauthRequired never masks the reauth error', async () => {
+    const { QboReauthRequiredError } = await import('../../../src/clients/token-store');
+    const store = makeFakeStore({ refreshToken: 'dead' });
+    store.markReauthRequired.mockRejectedValueOnce(new Error('db down'));
+    const client = makeStoreClient(store, { environment: 'production', refreshToken: 'dead' });
+    refreshDispatch.mockRejectedValue(deadTokenError(401));
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(client.authenticate()).rejects.toBeInstanceOf(QboReauthRequiredError);
+    expect(errSpy).toHaveBeenCalled();
+  });
+
+  it('a transient error never marks the company as needing reauth', async () => {
+    const store = makeFakeStore({ refreshToken: 'fine' });
+    const client = makeStoreClient(store, { environment: 'production', refreshToken: 'fine' });
+    refreshDispatch.mockRejectedValue(transientError(503));
+
+    await expect(client.authenticate()).rejects.toThrow(/Failed to refresh Quickbooks token/);
+    expect(store.markReauthRequired).not.toHaveBeenCalled();
   });
 });

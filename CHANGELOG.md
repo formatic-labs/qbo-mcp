@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — formatic-labs fork
 
+### Security
+- 2026-11-01 — **Dependency audit fixes** (PR #1 `audit` check): `@modelcontextprotocol/sdk` 1.30.0 → ^1.32.2
+  (high advisory ≤1.31.0), `zod` 3 → ^4.6.7 (high advisory <4.6.6), plus `npm audit fix` for transitive
+  axios/follow-redirects/body-parser/proxy-addr (critical)/qs/ip-address/hono/fast-uri. zod v4 requires a key
+  schema in `z.record()`, so 6 upstream tool files now use `z.record(z.string(), z.any())`. 760 tests, lint and
+  the sandbox smoke test (estimate #1018) pass. **Still open:** `decode-uri-component` (high, DoS) via
+  `intuit-oauth@4.2.5` → `query-string@6`; no upstream fix exists and the patched 0.5.x is ESM-only, which breaks
+  `query-string@6`'s `require()` — needs Johnny's call.
+
 ### Added
 - 2026-11-01 — **Behaviour note: stdio missing credentials** — the stdio server no longer crashes at startup when
   `QUICKBOOKS_CLIENT_ID` / `QUICKBOOKS_CLIENT_SECRET` / redirect URI are missing: the env client is now built lazily

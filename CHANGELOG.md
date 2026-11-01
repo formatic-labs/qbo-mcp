@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **ProjectPix handoff and HomeWatch pointer (Task 7, docs only)** — new
+  `docs/handoffs/2026-11-01-projectpix-qbo-connector.md` (decisions for the ProjectPix APP master session: migration,
+  Vault storage, QBO grant, Intuit callback, `/api/v1/qbo/mcp` route, Vault `TokenStore` with a session-level refresh
+  lock, weekly refresh job, `onWrite` audit; for the WEB session: Integrations/marketplace page and the Connect
+  QuickBooks card; proposed feature-map row; Johnny's Intuit/Vercel steps; test order; security gate) and
+  `docs/handoffs/2026-11-01-homewatch-qbo-pointer.md` (HomeWatch mounts the same package later). Why: the host side is
+  built in ProjectPix, which this repo must not touch; the controller routes the files.
 - 2026-11-01 — **Task 6 fix round 1** — `jest.config.js`: the 7 `no-useless-escape` lint errors (single-quoted `\.` in
   `coveragePathIgnorePatterns`) are fixed by writing `\\.` so the regex keeps a literal dot; ignore set unchanged
   (same 122 measured files and coverage summary, gate passes), `npm run lint` exits 0 repo-wide. `publish.yml` now runs

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Design: shared package + ProjectPix-hosted remote connector** —
+  `docs/superpowers/specs/2026-11-01-qbo-connector-hosting-design.md` (approved by Johnny). The connector
+  becomes `@formatic-labs/qbo-mcp`, mounted inside ProjectPix (Supabase OAuth logins, per-company QBO keys
+  in Supabase Vault per HomeWatch ADR-016, estimate-only tool allowlist, QBO writes owner/admin-only,
+  existing Intuit app renamed). Supersedes the home-server/Tailscale Funnel hosting plan (handoff steps 3–8).
+  Why: ProjectPix beta contractors need to connect their own QuickBooks; Johnny's Duet workflow needs a
+  connector reachable from the cloud. Sandbox findings that shaped it: `Subtotal: $X.XX` DescriptionOnly
+  lines become live subtotals; deposit is not exposed by the QBO API.
 - 2026-10-05 — **At-rest encryption of secrets (Windows DPAPI).** `src/helpers/token-crypto.ts`: values stored as
   `dpapi:<base64>` are decrypted at startup; with `QUICKBOOKS_TOKEN_ENCRYPTION=dpapi`, rotated refresh tokens are
   written encrypted. `npm run encrypt-env` (`src/encrypt-env.ts`, `src/helpers/encrypt-env-file.ts`) converts an

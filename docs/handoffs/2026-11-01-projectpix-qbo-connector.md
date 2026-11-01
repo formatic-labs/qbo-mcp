@@ -88,7 +88,14 @@ create/update when `canWrite` is false, but only the host can compute it, so get
   surface means editing the allowlist in the package, not in ProjectPix. Hosted surface today: customers, items,
   estimates, plus read-only lookups (company info, preferences, tax codes, terms, classes, invoice read/search). No
   deletes, bills, payments, journal entries, vendors, employees.
-- Next.js may need `serverExternalPackages: ["node-quickbooks", "intuit-oauth"]` in `next.config`.
+- A client built without `realmId` in hosted mode throws `QboConfigError` (a host bug, shown to the user as the generic
+  "Something went wrong" copy). It never flags the company for reconnect.
+- The hosted `tools` check is a programmer error, not a user error: a name outside the allowlist makes
+  `handleQboMcpRequest` throw (naming the extra tools), so the route returns 500.
+- Call `enterHostedMode()` at module scope in every host module that constructs a `QuickbooksClient` (the MCP route, the refresh job, the OAuth callback), and keep a single copy of the package in the server bundle (`serverExternalPackages`) — the hosted flag is per module instance.
+- Next.js may need `serverExternalPackages: ["node-quickbooks", "intuit-oauth"]` in `next.config` (add
+  `"@formatic-labs/qbo-mcp"` too, per the point above).
+- The package uses `@modelcontextprotocol/sdk` 1.x (its `WebStandardStreamableHTTPServerTransport`), so ProjectPix's 2.x `@modelcontextprotocol/server` route is unaffected.
 
 ## 4. Audit
 

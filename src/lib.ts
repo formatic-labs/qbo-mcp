@@ -13,6 +13,7 @@ export {
 export { HOSTED_TOOL_ALLOWLIST, ALL_TOOLS } from "./tools/catalog.js";
 export { QuickbooksClient } from "./clients/quickbooks-client.js";
 export {
+  QboConfigError,
   QboReauthRequiredError,
   QboTokenPersistError,
   type TokenStore,

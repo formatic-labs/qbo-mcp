@@ -18,8 +18,9 @@ import {
   type RegisterQboToolsOptions,
 } from '../../src/register-qbo-tools';
 import { ALL_TOOLS, HOSTED_TOOL_ALLOWLIST } from '../../src/tools/catalog';
-import { currentQboContext, QboNotConnectedError, type QboCallContext } from '../../src/context/qbo-context';
-import { QboReauthRequiredError, QboTokenPersistError } from '../../src/clients/token-store';
+import { currentQboContext, isHostedMode, QboNotConnectedError, type QboCallContext } from '../../src/context/qbo-context';
+import { QboConfigError, QboReauthRequiredError, QboTokenPersistError } from '../../src/clients/token-store';
+import { QuickbooksClient } from '../../src/clients/quickbooks-client';
 import { knownParamKeys } from '../../src/helpers/register-tool';
 
 type Handler = (args: unknown, extra?: unknown) => Promise<any>;
@@ -69,6 +70,37 @@ afterEach(() => {
 });
 
 describe('registration', () => {
+  // Must stay first: hosted mode is process-wide and one-way.
+  it('hosted registration enters hosted mode itself (not only via handleQboMcpRequest)', () => {
+    expect(isHostedMode()).toBe(false);
+    const { server } = fakeServer();
+    registerQboTools(server, { hosted: true, resolveContext: async () => ({ client: fakeClient({}) }) });
+    expect(isHostedMode()).toBe(true);
+    // ...so a client built afterwards cannot fall back to the .env token store.
+    expect(
+      () =>
+        new QuickbooksClient({
+          clientId: 'cid',
+          clientSecret: 'secret',
+          realmId: 'r',
+          environment: 'sandbox',
+          redirectUri: 'http://localhost:8000/callback',
+        }),
+    ).toThrow(/explicit tokenStore/);
+  });
+
+  it('hosted rejects a tool outside HOSTED_TOOL_ALLOWLIST, naming it (ruling R5)', () => {
+    const { server } = fakeServer();
+    expect(() =>
+      registerQboTools(server, {
+        hosted: true,
+        tools: ['get_estimate', 'create_invoice'],
+        resolveContext: async () => ({ client: fakeClient({}) }),
+      }),
+    ).toThrow(/not in HOSTED_TOOL_ALLOWLIST: create_invoice$/);
+    expect(server.tool).not.toHaveBeenCalled();
+  });
+
   it('hosted registers exactly the allowlist', () => {
     const { tools } = hosted({ client: fakeClient({}), actor: owner });
     expect([...tools.keys()].sort()).toEqual([...HOSTED_TOOL_ALLOWLIST].sort());
@@ -80,11 +112,16 @@ describe('registration', () => {
     expect([...tools.keys()].sort()).toEqual([...HOSTED_TOOL_ALLOWLIST].sort());
   });
 
-  it('hosted never registers delete tools even if the allowlist names one', () => {
-    const { tools } = hosted({ client: fakeClient({}), actor: owner }, {
-      tools: ['get_estimate', 'delete_estimate', 'delete_invoice'],
-    });
-    expect([...tools.keys()]).toEqual(['get_estimate']);
+  it('hosted never registers delete tools: naming one is rejected (not in the allowlist)', () => {
+    const { server } = fakeServer();
+    expect(() =>
+      registerQboTools(server, {
+        hosted: true,
+        tools: ['get_estimate', 'delete_estimate', 'delete_invoice'],
+        resolveContext: async () => ({ client: fakeClient({}) }),
+      }),
+    ).toThrow(/delete_estimate, delete_invoice/);
+    expect(HOSTED_TOOL_ALLOWLIST.some((n) => /^delete[_-]/.test(n))).toBe(false);
   });
 
   it('hosted without resolveContext is a hard error', () => {
@@ -194,6 +231,22 @@ describe('per-call wrapper (hosted)', () => {
     });
     const result = await tools.get('get_estimate')!.handler({ params: { id: '1' } }, {});
     expect(text(result)).toEqual([QBO_MESSAGES.reauth]);
+  });
+
+  it('a QboConfigError (missing realmId) maps to the generic text, from resolveContext or the call', async () => {
+    const fromResolve = hosted(async () => {
+      throw new QboConfigError();
+    });
+    const r1 = await fromResolve.tools.get('get_estimate')!.handler({ params: { id: '1' } }, {});
+    expect(text(r1)).toEqual([QBO_MESSAGES.generic]);
+
+    const client = fakeClient({}, async () => {
+      throw new QboConfigError();
+    });
+    const fromCall = hosted({ client, actor: owner });
+    const r2 = await fromCall.tools.get('create_estimate')!.handler({ params: { estimate: {} } }, {});
+    expect(text(r2)).toEqual([QBO_MESSAGES.generic]);
+    expect(fromCall.onWrite).toHaveBeenCalledWith(expect.objectContaining({ ok: false, error: 'QboConfigError' }));
   });
 
   it('resolveContext throwing QboTokenPersistError returns the persist text', async () => {

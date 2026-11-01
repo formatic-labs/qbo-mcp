@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Final review fixes: hosted entry points, missing realmId, save backoff** — (1) Ruling R9: a hosted
+  `QuickbooksClient` built without `realmId` now throws the new exported `QboConfigError` ("QuickBooks client is
+  missing its company (realmId); pass realmId from the integration row.") at construction, and the hosted OAuth path
+  throws it too for a realm-less client built before `enterHostedMode()`; neither ever calls `markReauthRequired`, so a
+  healthy company is no longer flipped to `reauth_required`. `registerQboTools` maps it to the generic copy. (2)
+  `registerQboTools(server, { hosted: true })` now calls `enterHostedMode()` itself and enforces that `tools` is a
+  subset of `HOSTED_TOOL_ALLOWLIST` (the R5 check moved here from `handleQboMcpRequest`, which still rejects naming the
+  extra tools), so a direct hosted registration gets the same protections; delete names are now rejected by that
+  check (still never registered). Documented as a programmer error (host returns 500). (3) Rotated-token save retries
+  wait 100 ms then 300 ms between attempts. (4) README "Hosted use" example passes `realmId` and `environment` from the
+  integration row, computes `canWrite` as owner/admin AND the QBO write grant (D9), fixes the `TokenStore` stub
+  comment to the `StoredQboTokens` shape, calls `enterHostedMode()` at module scope and adds the package to
+  `serverExternalPackages`. Handoff section 3 adds the module-scope `enterHostedMode()` rule, the single-copy bundle
+  rule, the `QboConfigError` note and the SDK 1.x vs ProjectPix 2.x note. Why: final whole-branch review.
 - 2026-11-01 — **Task 7 fix round 1 (docs)** — ProjectPix handoff: install guidance now local `npm pack`/`npm link`, deploys wait for the published 0.1.0 via `NPM_RC` (no git-token path); states QBO grant storage is APP's call, default QBO roles, proposed 1-year audit retention, and WEB's dependency on APP's connect-URL/status endpoints; adds session-start briefing line and full spec source paths. Why: review ruling R8.
 - 2026-11-01 — **ProjectPix handoff and HomeWatch pointer (Task 7, docs only)** — new
   `docs/handoffs/2026-11-01-projectpix-qbo-connector.md` (decisions for the ProjectPix APP master session: migration,

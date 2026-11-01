@@ -168,7 +168,7 @@ describe('package entry', () => {
       expect.arrayContaining([
         'handleQboMcpRequest', 'registerQboTools', 'HOSTED_TOOL_ALLOWLIST', 'ALL_TOOLS', 'QuickbooksClient',
         'EnvFileTokenStore', 'runWithQboContext', 'QboNotConnectedError', 'QboReauthRequiredError',
-        'QboTokenPersistError', 'QBO_MESSAGES', 'enterHostedMode', 'isHostedMode',
+        'QboTokenPersistError', 'QboConfigError', 'QBO_MESSAGES', 'enterHostedMode', 'isHostedMode',
       ]),
     );
   });

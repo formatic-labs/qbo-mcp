@@ -65,3 +65,19 @@ export class QboTokenPersistError extends Error {
     this.name = 'QboTokenPersistError';
   }
 }
+
+/**
+ * Thrown in hosted mode when a QuickbooksClient is built without its company
+ * (`realmId`). A configuration error in the host, not a dead token: the
+ * company is never flagged for reconnect because of it (ruling R9). The host
+ * must pass `realmId` from its integration row (TokenStore.read() does not
+ * return one).
+ */
+export class QboConfigError extends Error {
+  static readonly MISSING_REALM =
+    'QuickBooks client is missing its company (realmId); pass realmId from the integration row.';
+  constructor(message: string = QboConfigError.MISSING_REALM) {
+    super(message);
+    this.name = 'QboConfigError';
+  }
+}

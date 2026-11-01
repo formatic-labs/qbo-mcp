@@ -20,12 +20,13 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { ALL_TOOLS, HOSTED_TOOL_ALLOWLIST } from "./tools/catalog.js";
 import { CRUD_CATEGORY, getCrudCategory, RegisterTool, type ToolHandlerFn } from "./helpers/register-tool.js";
 import {
+  enterHostedMode,
   QboNotConnectedError,
   runWithQboContext,
   type QboActor,
   type QboCallContext,
 } from "./context/qbo-context.js";
-import { QboReauthRequiredError, QboTokenPersistError } from "./clients/token-store.js";
+import { QboConfigError, QboReauthRequiredError, QboTokenPersistError } from "./clients/token-store.js";
 import { QuickbooksClient } from "./clients/quickbooks-client.js";
 
 /** One create/update attempt, reported to the host's audit log. Never holds tokens. */
@@ -41,7 +42,12 @@ export interface QboWriteAuditEvent {
 }
 
 export interface RegisterQboToolsOptions {
-  /** Tool names to register. Default: all (stdio); hosted defaults to HOSTED_TOOL_ALLOWLIST. */
+  /**
+   * Tool names to register. Default: all (stdio); hosted defaults to HOSTED_TOOL_ALLOWLIST.
+   * Hosted: must be a subset of HOSTED_TOOL_ALLOWLIST (the ceiling, widened only by
+   * editing it in this package). Any other name throws — a programmer error, so the
+   * host's request fails (500) rather than exposing an unvetted tool.
+   */
   tools?: readonly string[];
   /** Resolves the caller's company client and actor for one call. Required when hosted. */
   resolveContext?: (extra: { authInfo?: AuthInfo }) => Promise<QboCallContext>;
@@ -70,6 +76,8 @@ function knownErrorMessage(err: unknown): string | undefined {
   if (err instanceof QboNotConnectedError) return QBO_MESSAGES.notConnected;
   if (err instanceof QboReauthRequiredError) return QBO_MESSAGES.reauth;
   if (err instanceof QboTokenPersistError) return QBO_MESSAGES.persistFailed;
+  // Missing realmId is the host's configuration error (ruling R9): generic copy, never "reconnect".
+  if (err instanceof QboConfigError) return QBO_MESSAGES.generic;
   return undefined;
 }
 
@@ -126,6 +134,21 @@ export function registerQboTools(server: McpServer, options: RegisterQboToolsOpt
   if (hosted && !resolveContext) {
     throw new Error("registerQboTools: resolveContext is required when hosted is true");
   }
+  if (hosted) {
+    // Idempotent. Done here (not only in handleQboMcpRequest) so every hosted
+    // entry point gets the protections: from now on the .env client is
+    // unreachable, a missing context fails closed, and a client needs an
+    // explicit tokenStore and realmId.
+    enterHostedMode();
+    // Ruling R5: the allowlist is the ceiling. A name outside it is a programmer
+    // error and throws (the host's request fails) instead of widening the surface.
+    if (options.tools) {
+      const extra = options.tools.filter((n) => !HOSTED_TOOL_ALLOWLIST.includes(n));
+      if (extra.length) {
+        throw new Error(`registerQboTools: tools not in HOSTED_TOOL_ALLOWLIST: ${extra.join(", ")}`);
+      }
+    }
+  }
 
   const wanted = options.tools ?? (hosted ? HOSTED_TOOL_ALLOWLIST : undefined);
   if (wanted) {
@@ -136,9 +159,9 @@ export function registerQboTools(server: McpServer, options: RegisterQboToolsOpt
   const wantedSet = wanted ? new Set(wanted) : undefined;
 
   for (const tool of ALL_TOOLS) {
-    if (wantedSet && !wantedSet.has(tool.name)) continue;
     const category = getCrudCategory(tool.name);
     if (hosted && category === CRUD_CATEGORY.DELETE) continue; // D7: never, whatever the list says
+    if (wantedSet && !wantedSet.has(tool.name)) continue;
 
     const isWrite = category === CRUD_CATEGORY.WRITE || category === CRUD_CATEGORY.UPDATE;
     const auditBase = isWrite

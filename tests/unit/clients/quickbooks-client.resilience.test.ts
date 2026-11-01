@@ -583,16 +583,29 @@ describe('TokenStore: client built with tokenStore only (fix round 1, #1)', () =
 describe('TokenStore: persisting a rotated token (fix round 1, #2 / ruling R3)', () => {
   const rotatedResponse = () => ({ token: { access_token: 'at-r', expires_in: 3600, refresh_token: 'rotated-R' } });
 
+  /** Run setTimeout callbacks at once and record the requested delays (keeps the suite fast). */
+  const recordDelays = () => {
+    const delays: number[] = [];
+    jest.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+    return delays;
+  };
+
   it('retries the save: fails twice then succeeds -> saved, no error', async () => {
     const store = makeFakeStore({ refreshToken: 'T0' });
     store.save.mockRejectedValueOnce(new Error('blip')).mockRejectedValueOnce(new Error('blip'));
     const client = makeStoreClient(store, { strictPersistence: true });
     refreshDispatch.mockResolvedValueOnce(rotatedResponse());
     const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const delays = recordDelays();
 
     await expect(client.refreshAccessToken()).resolves.toEqual({ access_token: 'at-r', expires_in: 3600 });
 
     expect(store.save).toHaveBeenCalledTimes(3);
+    expect(delays).toEqual([100, 300]); // backoff between the three attempts
     expect(store.current?.refreshToken).toBe('rotated-R');
     expect(errSpy.mock.calls.map((c) => String(c[0])).join('\n')).not.toMatch(/Failed to persist/);
   });
@@ -603,8 +616,10 @@ describe('TokenStore: persisting a rotated token (fix round 1, #2 / ruling R3)',
     store.save.mockRejectedValue(new Error('db down'));
     const client = makeStoreClient(store, { strictPersistence: true });
     refreshDispatch.mockResolvedValueOnce(rotatedResponse());
+    const delays = recordDelays();
 
     const err = await client.authenticate().catch((e) => e);
+    expect(delays).toEqual([100, 300]); // no wait after the last attempt
 
     expect(err).toBeInstanceOf(QboTokenPersistError);
     expect((err as Error).name).toBe('QboTokenPersistError');
@@ -619,10 +634,12 @@ describe('TokenStore: persisting a rotated token (fix round 1, #2 / ruling R3)',
     const client = makeStoreClient(store);
     refreshDispatch.mockResolvedValueOnce(rotatedResponse());
     const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const delays = recordDelays();
 
     await expect(client.refreshAccessToken()).resolves.toEqual({ access_token: 'at-r', expires_in: 3600 });
 
     expect(store.save).toHaveBeenCalledTimes(3);
+    expect(delays).toEqual([100, 300]);
     expect(errSpy.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/Failed to persist refreshed QuickBooks tokens \(Error\)/);
   });
 
@@ -632,10 +649,12 @@ describe('TokenStore: persisting a rotated token (fix round 1, #2 / ruling R3)',
     const client = makeStoreClient(store, { strictPersistence: true });
     refreshDispatch.mockResolvedValueOnce({ token: { access_token: 'at-n', expires_in: 3600, refresh_token: 'T0' } });
     const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const delays = recordDelays();
 
     await expect(client.refreshAccessToken()).resolves.toEqual({ access_token: 'at-n', expires_in: 3600 });
 
     expect(store.save).toHaveBeenCalledTimes(1);
+    expect(delays).toEqual([]);
     expect(errSpy.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/Failed to persist refreshed QuickBooks tokens \(string\)/);
   });
 });

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import open from 'open';
 import { decryptSecret } from '../helpers/token-crypto.js';
 import { EnvFileTokenStore } from './env-file-token-store.js';
-import { QboReauthRequiredError, QboTokenPersistError, type TokenStore } from './token-store.js';
+import { QboConfigError, QboReauthRequiredError, QboTokenPersistError, type TokenStore } from './token-store.js';
 import { currentQboContext, getEnvClient, isHostedMode, QboNotConnectedError } from '../context/qbo-context.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -153,6 +153,10 @@ export class QuickbooksClient {
   // the log-only behaviour; the in-memory token still serves this process.
   private readonly strictPersistence: boolean;
   private static readonly SAVE_ATTEMPTS = 3;
+  // Backoff before save attempts 2 and 3, so a brief store blip (a dropped
+  // connection, a locked .env on Windows) can clear between tries. Short: the
+  // refresh lock is held while waiting.
+  private static readonly SAVE_RETRY_DELAYS_MS = [100, 300] as const;
 
   constructor(config: {
     clientId: string;
@@ -178,6 +182,13 @@ export class QuickbooksClient {
     // Fork: hosted mode must never fall back to the .env token store.
     if (!config.tokenStore && isHostedMode()) {
       throw new Error('QuickbooksClient requires an explicit tokenStore in hosted mode');
+    }
+    // Fork (ruling R9): TokenStore.read() never returns a realm, so a hosted
+    // client without one can never authenticate. That is the host's
+    // configuration error, not a dead token: fail here, before anything could
+    // flag a healthy company for reconnect.
+    if (!config.realmId && isHostedMode()) {
+      throw new QboConfigError();
     }
     this.tokenStore = config.tokenStore ?? new EnvFileTokenStore(tokenStorePath());
     this.accessToken = config.accessToken;
@@ -322,6 +333,9 @@ export class QuickbooksClient {
     // browser or bind a local callback server. Flag the company for reconnect
     // so the host's "reconnect QuickBooks" handling fires.
     if (isHostedMode()) {
+      // A missing realm (a client built before enterHostedMode()) is a
+      // configuration error: never mark the company for reconnect over it.
+      if (!this.realmId) throw new QboConfigError();
       throw await this.reauthRequired(
         new QboReauthRequiredError('QuickBooks must be reconnected for this company.'),
         'QuickBooks refresh token missing or rejected',
@@ -575,6 +589,10 @@ export class QuickbooksClient {
     let persistErr: unknown;
     let saved = false;
     for (let attempt = 1; attempt <= attempts && !saved; attempt++) {
+      if (attempt > 1) {
+        const delayMs = QuickbooksClient.SAVE_RETRY_DELAYS_MS[attempt - 2];
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
       try {
         await this.tokenStore.save({
           refreshToken: this.refreshToken,

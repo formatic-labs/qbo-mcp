@@ -120,6 +120,22 @@ function freshClient(realmId: string) {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 
+// Built while still in stdio mode, with no realmId (allowed there: the
+// interactive sign-in learns it). The last test enters hosted mode and uses it,
+// to prove the hosted OAuth path never flags reconnect for a missing realm.
+const earlyStore = memoryStore();
+const earlyNoRealmClient = importResult.ok
+  ? new importResult.mods[1].QuickbooksClient({
+      clientId: 'cid',
+      clientSecret: 'secret',
+      refreshToken: 'early-refresh',
+      environment: 'sandbox',
+      redirectUri: 'http://localhost:8000/callback',
+      tokenStore: earlyStore,
+    })
+  : undefined;
+
+
 describe('qbo-context', () => {
   it('importing the client and context without QUICKBOOKS_* env does not throw', () => {
     expect(importResult.ok).toBe(true);
@@ -300,6 +316,7 @@ describe('qbo-context', () => {
     const client = new QuickbooksClient({
       clientId: 'cid',
       clientSecret: 'secret',
+      realmId: 'hosted-empty',
       environment: 'sandbox',
       redirectUri: 'http://localhost:8000/callback',
       tokenStore: store,
@@ -308,6 +325,46 @@ describe('qbo-context', () => {
       QboReauthRequiredError,
     );
     expect(store.markReauthRequired).toHaveBeenCalledTimes(1);
+    expect(createServerMock).not.toHaveBeenCalled();
+    expect(openMock).not.toHaveBeenCalled();
+  });
+  it('hosted: a client built without realmId is a QboConfigError at construction, never a reconnect (ruling R9)', async () => {
+    const { QuickbooksClient, enterHostedMode } = mods();
+    const { QboConfigError } = await import('../../../src/clients/token-store');
+    enterHostedMode();
+    const store = memoryStore();
+    let err: unknown;
+    try {
+      new QuickbooksClient({
+        clientId: 'cid',
+        clientSecret: 'secret',
+        refreshToken: 'healthy-refresh',
+        environment: 'production',
+        redirectUri: 'https://example.test/callback',
+        tokenStore: store,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(QboConfigError);
+    expect((err as Error).name).toBe('QboConfigError');
+    expect((err as Error).message).toBe(
+      'QuickBooks client is missing its company (realmId); pass realmId from the integration row.',
+    );
+    expect(store.markReauthRequired).not.toHaveBeenCalled();
+    expect(store.read).not.toHaveBeenCalled();
+  });
+
+  it('hosted: a realm-less client built before hosted mode fails as QboConfigError, not reauth', async () => {
+    const { QuickbooksClient, runWithQboContext, enterHostedMode } = mods();
+    const { QboConfigError } = await import('../../../src/clients/token-store');
+    // stdio was unchanged: building it without realmId did not throw.
+    expect(earlyNoRealmClient).toBeInstanceOf(QuickbooksClient);
+    enterHostedMode();
+    await expect(
+      runWithQboContext({ client: earlyNoRealmClient! }, () => QuickbooksClient.getInstance()),
+    ).rejects.toBeInstanceOf(QboConfigError);
+    expect(earlyStore.markReauthRequired).not.toHaveBeenCalled();
     expect(createServerMock).not.toHaveBeenCalled();
     expect(openMock).not.toHaveBeenCalled();
   });

@@ -10,7 +10,6 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { registerQboTools, type RegisterQboToolsOptions } from "../register-qbo-tools.js";
 import { enterHostedMode } from "../context/qbo-context.js";
-import { HOSTED_TOOL_ALLOWLIST } from "../tools/catalog.js";
 
 export interface QboHostedOptions extends Omit<RegisterQboToolsOptions, "hosted" | "tools"> {
   /** Resolves the caller's company client and actor for one call. */
@@ -18,8 +17,10 @@ export interface QboHostedOptions extends Omit<RegisterQboToolsOptions, "hosted"
   /**
    * Tool names to expose. Default: HOSTED_TOOL_ALLOWLIST. Must be a subset of it:
    * the allowlist is the ceiling, widened only by editing HOSTED_TOOL_ALLOWLIST in
-   * this package. Any other name makes handleQboMcpRequest reject. Delete tools are
-   * never exposed.
+   * this package. Any other name makes handleQboMcpRequest reject with an error
+   * naming the extra tools (checked in registerQboTools, so a direct hosted
+   * registerQboTools call gets the same check). That is a programmer error: the
+   * host's route lets it throw and returns 500. Delete tools are never exposed.
    */
   tools?: readonly string[];
 }
@@ -31,15 +32,10 @@ export async function handleQboMcpRequest(
   options: QboHostedOptions,
 ): Promise<Response> {
   // Idempotent. Done here so a host can never forget it: from now on the .env
-  // client is unreachable and a missing context fails closed.
+  // client is unreachable and a missing context fails closed. registerQboTools
+  // (hosted) also does it, and enforces the HOSTED_TOOL_ALLOWLIST ceiling on
+  // `tools` (ruling R5): a name outside it throws before anything is served.
   enterHostedMode();
-
-  if (options.tools) {
-    const extra = options.tools.filter((n) => !HOSTED_TOOL_ALLOWLIST.includes(n));
-    if (extra.length) {
-      throw new Error(`handleQboMcpRequest: tools not in HOSTED_TOOL_ALLOWLIST: ${extra.join(", ")}`);
-    }
-  }
 
   const server = new McpServer({ name: "qbo-mcp", version: "0.1.0" });
   registerQboTools(server, { ...options, hosted: true });

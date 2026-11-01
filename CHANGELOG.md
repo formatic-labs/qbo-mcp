@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Tool catalog + hosted allowlist** — `src/tools/catalog.ts` now holds `ALL_TOOLS` (the 142 tools
+  `src/index.ts` used to register one by one, same order) and `HOSTED_TOOL_ALLOWLIST` (the 22-tool estimate set the
+  hosted connector may expose). `src/index.ts` registers via a loop over `ALL_TOOLS`. Why: the shared package and the
+  hosted endpoint need one list of tools to consume and a hard allowlist to restrict it; tests pin the count, name
+  uniqueness, allowlist-subset-of-catalog, and the exact allowlist contents (no deletes, no non-estimate writes).
 - 2026-11-01 — **Implementation plan for the package** — `docs/superpowers/plans/2026-11-01-qbo-connector-package.md`:
   7 tasks (tool catalog + hosted allowlist, TokenStore with refresh lock, fail-closed request context,
   `registerQboTools` with write gate + audit hook, `handleQboMcpRequest` web-standard handler + package entry,

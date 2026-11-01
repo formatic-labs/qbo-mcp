@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Publish pipeline and hosted docs (Task 6)** — new `.github/workflows/publish.yml`: on push of a `v*` tag,
+  `npm ci` -> `npm test` (pretest builds) -> `npm publish` to GitHub Packages with `GITHUB_TOKEN` (`contents: read`,
+  `packages: write`, setup-node `registry-url`/`scope` `@formatic-labs`; actions pinned to the same majors as `ci.yml`).
+  README gains "Hosted use (ProjectPix)" (route-handler example with a Vault-backed `TokenStore` stub, `NPM_RC`,
+  `serverExternalPackages: ["node-quickbooks","intuit-oauth"]`). Verified end to end on the sandbox through
+  `handleQboMcpRequest` + `EnvFileTokenStore`: header/item/item/`Subtotal` estimate created and read back in the same
+  line order, `onWrite` recorded `Estimate`. Why: tag-driven publishing per GitHub-Packages-Playbook section 3; tagging waits on Johnny.
 - 2026-11-01 — **Hosted handler review fixes (Task 5)** — (1) `handleQboMcpRequest` now closes its per-request
   `McpServer`/transport in a `finally`, including when `handleRequest` throws; the already-built JSON response is
   unaffected. (2) Ruling R5: `options.tools` must be a subset of `HOSTED_TOOL_ALLOWLIST`; any other name rejects with

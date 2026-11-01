@@ -411,6 +411,60 @@ QUICKBOOKS_ENVIRONMENT=sandbox  # or 'production'
 
 ---
 
+## Hosted use (ProjectPix)
+
+Besides the stdio server, this fork ships as a library, `@formatic-labs/qbo-mcp`, that a web app mounts as a
+per-company MCP endpoint. The host owns authentication and token storage; the package owns the tools. Hosted mode
+exposes only the estimate-related allowlist (`HOSTED_TOOL_ALLOWLIST`), never a delete tool, and refuses writes unless
+the actor has `canWrite`.
+
+Install (GitHub Packages): commit `.npmrc` with `@formatic-labs:registry=https://npm.pkg.github.com` and set the
+read token as `NPM_RC` in the Vercel project (see `GitHub-Packages-Playbook.md` section 4; clients never receive a
+token). If Next.js bundling trips on the QuickBooks libraries, add
+`serverExternalPackages: ["node-quickbooks", "intuit-oauth"]` to `next.config`.
+
+```ts
+// app/api/mcp/qbo/route.ts
+import { handleQboMcpRequest, QuickbooksClient, type TokenStore } from "@formatic-labs/qbo-mcp";
+
+// Stub: implement against Vault (or any encrypted store), one record per company.
+// read/save hold { refreshToken, realmId? }; withRefreshLock serializes refreshes
+// so a rotated refresh token is never lost; markReauthRequired flags the company
+// as needing to reconnect QuickBooks.
+declare function vaultTokenStore(tenantId: string): TokenStore;
+
+export async function POST(request: Request) {
+  const user = await authenticate(request); // your auth; return 401 if absent
+  if (!user) return new Response("Unauthorized", { status: 401 });
+
+  return handleQboMcpRequest(
+    request,
+    { token: "n/a", clientId: "projectpix", scopes: [], extra: { tenantId: user.tenantId, userId: user.id, canWrite: user.isOwner } },
+    {
+      resolveContext: async ({ authInfo }) => {
+        const { tenantId, userId, canWrite } = authInfo!.extra as { tenantId: string; userId: string; canWrite: boolean };
+        const client = new QuickbooksClient({
+          clientId: process.env.QUICKBOOKS_CLIENT_ID!,
+          clientSecret: process.env.QUICKBOOKS_CLIENT_SECRET!,
+          environment: "production",
+          redirectUri: process.env.QUICKBOOKS_REDIRECT_URI!,
+          tokenStore: vaultTokenStore(tenantId), // required in hosted mode
+          strictPersistence: true,
+        });
+        return { client, actor: { tenantId, userId, canWrite } };
+      },
+      onWrite: async (event) => audit.log(event), // QboWriteAuditEvent: who, which tool, entity type and Id
+    },
+  );
+}
+declare function authenticate(r: Request): Promise<{ id: string; tenantId: string; isOwner: boolean } | null>;
+declare const audit: { log(e: unknown): Promise<void> };
+```
+
+Each request builds a fresh stateless server (JSON responses, no session id), so it runs on serverless. Pass `tools`
+to narrow the exposed set; it must be a subset of the allowlist or the call rejects. Publishing is tag-driven:
+pushing `vX.Y.Z` runs `.github/workflows/publish.yml`.
+
 ## Development
 
 ### Building

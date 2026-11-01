@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Added
+- 2026-11-01 — **Implementation plan for the package** — `docs/superpowers/plans/2026-11-01-qbo-connector-package.md`:
+  7 tasks (tool catalog + hosted allowlist, TokenStore with refresh lock, fail-closed request context,
+  `registerQboTools` with write gate + audit hook, `handleQboMcpRequest` web-standard handler + package entry,
+  GitHub Packages publish, ProjectPix handoff). Stays on `@modelcontextprotocol/sdk` 1.x, whose
+  `WebStandardStreamableHTTPServerTransport` lets ProjectPix mount it without an SDK migration.
 - 2026-11-01 — **Design: shared package + ProjectPix-hosted remote connector** —
   `docs/superpowers/specs/2026-11-01-qbo-connector-hosting-design.md` (approved by Johnny). The connector
   becomes `@formatic-labs/qbo-mcp`, mounted inside ProjectPix (Supabase OAuth logins, per-company QBO keys

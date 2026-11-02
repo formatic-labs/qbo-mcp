@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — formatic-labs fork
 
 ### Security
+- 2026-11-01 — **Audit gate allowlists the `decode-uri-component` advisory** (Johnny's call). New
+  `scripts/audit-check.mjs` wraps `npm audit --json` and fails CI on any high/critical production advisory not on
+  its reviewed allowlist; `dependency-audit.yml` runs it instead of `npm audit --audit-level=high`. Allowlisted:
+  GHSA-qr28-fpjm-wq7f / GHSA-vcc3-ghjq-m6fr (via `intuit-oauth@4` → `query-string@6`). Why: no compatible fix
+  exists and the code path only parses the local OAuth callback URL, never used in hosted mode. Recheck when
+  `intuit-oauth` moves off `query-string@6`.
 - 2026-11-01 — **Dependency audit fixes** (PR #1 `audit` check): `@modelcontextprotocol/sdk` 1.30.0 → ^1.32.2
   (high advisory ≤1.31.0), `zod` 3 → ^4.6.7 (high advisory <4.6.6), plus `npm audit fix` for transitive
   axios/follow-redirects/body-parser/proxy-addr (critical)/qs/ip-address/hono/fast-uri. zod v4 requires a key

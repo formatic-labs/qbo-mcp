@@ -18,6 +18,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # Upstream intuit-oauth still carries a moderate, no-fix advisory through
-      # query-string/decode-uri-component. Block high and critical regressions.
-      - run: npm audit --omit=dev --audit-level=high
+      # Fails on high/critical production advisories not on the reviewed
+      # allowlist in scripts/audit-check.mjs (each entry documents why).
+      - run: node scripts/audit-check.mjs

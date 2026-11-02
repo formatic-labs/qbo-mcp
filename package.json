@@ -1,14 +1,28 @@
 {
-    "name": "@qboapi/qbo-mcp-server",
-    "version": "0.0.1",
+    "name": "@formatic-labs/qbo-mcp",
+    "version": "0.1.0",
     "description": "MCP server implementation for QuickBooks Online integration",
     "license": "MIT",
-    "main": "dist/index.js",
+    "main": "dist/lib.js",
+    "types": "dist/lib.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/lib.d.ts",
+            "import": "./dist/lib.js"
+        }
+    },
     "type": "module",
     "bin": "./dist/index.js",
     "files": [
         "dist"
     ],
+    "publishConfig": {
+        "registry": "https://npm.pkg.github.com"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/formatic-labs/qbo-mcp.git"
+    },
     "scripts": {
         "build": "tsc && shx chmod +x dist/*.js",
         "prepare": "npm run build",
@@ -19,17 +33,18 @@
         "encrypt-env": "node dist/encrypt-env.js",
         "encrypt-env:prod": "node scripts/with-prod-store.mjs dist/encrypt-env.js",
         "auth:prod": "node scripts/with-prod-store.mjs dist/auth-server.js",
+        "pretest": "npm run build",
         "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
         "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
         "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.26.0",
+        "@modelcontextprotocol/sdk": "^1.32.2",
         "dotenv": "^16.4.7",
         "intuit-oauth": "^4.2.5",
         "node-quickbooks": "^2.0.43",
         "open": "^9.1.0",
-        "zod": "^3.24.2"
+        "zod": "^4.6.7"
     },
     "devDependencies": {
         "@eslint/js": "^9.22.0",

@@ -18,9 +18,13 @@
  * - http://localhost:8000/callback must be registered as a redirect URI in your Intuit app
  */
 
-import { quickbooksClient } from './clients/quickbooks-client.js';
+import { installProcessErrorLogging, loadTokenStoreEnv, quickbooksClient } from './clients/quickbooks-client.js';
 
 async function main() {
+  // Fork: stdio-only startup that used to happen at client-module import.
+  loadTokenStoreEnv();
+  installProcessErrorLogging();
+
   console.log('QuickBooks OAuth Authentication');
   console.log('================================\n');
   console.log('Starting OAuth flow...');

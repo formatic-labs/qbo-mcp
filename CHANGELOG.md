@@ -7,7 +7,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — formatic-labs fork
 
+### Security
+- 2026-11-01 — **Audit gate allowlists the `decode-uri-component` advisory** (Johnny's call). New
+  `scripts/audit-check.mjs` wraps `npm audit --json` and fails CI on any high/critical production advisory not on
+  its reviewed allowlist; `dependency-audit.yml` runs it instead of `npm audit --audit-level=high`. Allowlisted:
+  GHSA-qr28-fpjm-wq7f / GHSA-vcc3-ghjq-m6fr (via `intuit-oauth@4` → `query-string@6`). Why: no compatible fix
+  exists and the code path only parses the local OAuth callback URL, never used in hosted mode. Recheck when
+  `intuit-oauth` moves off `query-string@6`.
+- 2026-11-01 — **Dependency audit fixes** (PR #1 `audit` check): `@modelcontextprotocol/sdk` 1.30.0 → ^1.32.2
+  (high advisory ≤1.31.0), `zod` 3 → ^4.6.7 (high advisory <4.6.6), plus `npm audit fix` for transitive
+  axios/follow-redirects/body-parser/proxy-addr (critical)/qs/ip-address/hono/fast-uri. zod v4 requires a key
+  schema in `z.record()`, so 6 upstream tool files now use `z.record(z.string(), z.any())`. 760 tests, lint and
+  the sandbox smoke test (estimate #1018) pass. **Still open:** `decode-uri-component` (high, DoS) via
+  `intuit-oauth@4.2.5` → `query-string@6`; no upstream fix exists and the patched 0.5.x is ESM-only, which breaks
+  `query-string@6`'s `require()` — needs Johnny's call.
+
 ### Added
+- 2026-11-01 — **Behaviour note: stdio missing credentials** — the stdio server no longer crashes at startup when
+  `QUICKBOOKS_CLIENT_ID` / `QUICKBOOKS_CLIENT_SECRET` / redirect URI are missing: the env client is now built lazily
+  on the first tool call, so the server starts, lists its tools, and each tool call reports the missing credentials
+  instead. Why: a side effect of making the library import side-effect free (lazy env client), recorded per the final
+  review.
+- 2026-11-01 — **Final review fixes: hosted entry points, missing realmId, save backoff** — (1) Ruling R9: a hosted
+  `QuickbooksClient` built without `realmId` now throws the new exported `QboConfigError` ("QuickBooks client is
+  missing its company (realmId); pass realmId from the integration row.") at construction, and the hosted OAuth path
+  throws it too for a realm-less client built before `enterHostedMode()`; neither ever calls `markReauthRequired`, so a
+  healthy company is no longer flipped to `reauth_required`. `registerQboTools` maps it to the generic copy. (2)
+  `registerQboTools(server, { hosted: true })` now calls `enterHostedMode()` itself and enforces that `tools` is a
+  subset of `HOSTED_TOOL_ALLOWLIST` (the R5 check moved here from `handleQboMcpRequest`, which still rejects naming the
+  extra tools), so a direct hosted registration gets the same protections; delete names are now rejected by that
+  check (still never registered). Documented as a programmer error (host returns 500). (3) Rotated-token save retries
+  wait 100 ms then 300 ms between attempts. (4) README "Hosted use" example passes `realmId` and `environment` from the
+  integration row, computes `canWrite` as owner/admin AND the QBO write grant (D9), fixes the `TokenStore` stub
+  comment to the `StoredQboTokens` shape, calls `enterHostedMode()` at module scope and adds the package to
+  `serverExternalPackages`. Handoff section 3 adds the module-scope `enterHostedMode()` rule, the single-copy bundle
+  rule, the `QboConfigError` note and the SDK 1.x vs ProjectPix 2.x note. Why: final whole-branch review.
+- 2026-11-01 — **Task 7 fix round 1 (docs)** — ProjectPix handoff: install guidance now local `npm pack`/`npm link`, deploys wait for the published 0.1.0 via `NPM_RC` (no git-token path); states QBO grant storage is APP's call, default QBO roles, proposed 1-year audit retention, and WEB's dependency on APP's connect-URL/status endpoints; adds session-start briefing line and full spec source paths. Why: review ruling R8.
+- 2026-11-01 — **ProjectPix handoff and HomeWatch pointer (Task 7, docs only)** — new
+  `docs/handoffs/2026-11-01-projectpix-qbo-connector.md` (decisions for the ProjectPix APP master session: migration,
+  Vault storage, QBO grant, Intuit callback, `/api/v1/qbo/mcp` route, Vault `TokenStore` with a session-level refresh
+  lock, weekly refresh job, `onWrite` audit; for the WEB session: Integrations/marketplace page and the Connect
+  QuickBooks card; proposed feature-map row; Johnny's Intuit/Vercel steps; test order; security gate) and
+  `docs/handoffs/2026-11-01-homewatch-qbo-pointer.md` (HomeWatch mounts the same package later). Why: the host side is
+  built in ProjectPix, which this repo must not touch; the controller routes the files.
+- 2026-11-01 — **Task 6 fix round 1** — `jest.config.js`: the 7 `no-useless-escape` lint errors (single-quoted `\.` in
+  `coveragePathIgnorePatterns`) are fixed by writing `\\.` so the regex keeps a literal dot; ignore set unchanged
+  (same 122 measured files and coverage summary, gate passes), `npm run lint` exits 0 repo-wide. `publish.yml` now runs
+  `npm run lint` before `npm test` and fails unless the tag equals `v` + package.json version.
+- 2026-11-01 — **Publish pipeline and hosted docs (Task 6)** — new `.github/workflows/publish.yml`: on push of a `v*` tag,
+  `npm ci` -> `npm test` (pretest builds) -> `npm publish` to GitHub Packages with `GITHUB_TOKEN` (`contents: read`,
+  `packages: write`, setup-node `registry-url`/`scope` `@formatic-labs`; actions pinned to the same majors as `ci.yml`).
+  README gains "Hosted use (ProjectPix)" (route-handler example with a Vault-backed `TokenStore` stub, `NPM_RC`,
+  `serverExternalPackages: ["node-quickbooks","intuit-oauth"]`). Verified end to end on the sandbox through
+  `handleQboMcpRequest` + `EnvFileTokenStore`: header/item/item/`Subtotal` estimate created and read back in the same
+  line order, `onWrite` recorded `Estimate`. Why: tag-driven publishing per GitHub-Packages-Playbook section 3; tagging waits on Johnny.
+- 2026-11-01 — **Hosted handler review fixes (Task 5)** — (1) `handleQboMcpRequest` now closes its per-request
+  `McpServer`/transport in a `finally`, including when `handleRequest` throws; the already-built JSON response is
+  unaffected. (2) Ruling R5: `options.tools` must be a subset of `HOSTED_TOOL_ALLOWLIST`; any other name rejects with
+  an error naming the extra tools (the allowlist is the ceiling, widened by editing it in this package). (3)
+  `pretest` runs `npm run build` so the dist-based side-effect test works on a clean checkout.
+- 2026-11-01 — **Web-standard hosted handler and `@formatic-labs/qbo-mcp` package entry** — new
+  `src/hosted/handle-request.ts`: `handleQboMcpRequest(request, authInfo, { resolveContext, tools?, onWrite? })`
+  builds a fresh `McpServer` + `WebStandardStreamableHTTPServerTransport` (stateless, JSON responses) per request,
+  registers the hosted tools and passes `authInfo` through to `resolveContext`. It calls `enterHostedMode()` itself
+  (idempotent) before anything else, so a host cannot forget it. New `src/lib.ts` is the side-effect-free package entry
+  (re-exports only; the stdio bin `src/index.ts` is never imported from it; checked in a fresh process). `package.json`:
+  name `@formatic-labs/qbo-mcp`, version `0.1.0`, `main`/`types`/`exports` -> `dist/lib.*`, `bin` unchanged,
+  `publishConfig` -> `https://npm.pkg.github.com`, `repository` -> `formatic-labs/qbo-mcp`; `tsconfig.json` emits
+  declarations; `package-lock.json` root name follows. Why: ProjectPix's Next.js route authenticates the caller and returns this handler's `Response` as-is.
+- 2026-11-01 — **`registerQboTools` with hosted allowlist, write gate and audit hook** — new `src/register-qbo-tools.ts`
+  (`registerQboTools`, `QBO_MESSAGES`, types `RegisterQboToolsOptions` / `QboWriteAuditEvent`). stdio (`src/index.ts`
+  now calls `registerQboTools(server)`) registers the same 142 tools in the same order, `QUICKBOOKS_DISABLE_*` still
+  honoured (checked by listing tools over stdio before and after). `hosted: true` registers only the allowlist
+  (default `HOSTED_TOOL_ALLOWLIST`), never a delete tool, and requires `resolveContext`. Each hosted call resolves
+  `{ client, actor }` from the host's `authInfo`, refuses create/update unless `actor.canWrite`, runs the unchanged
+  handler inside `runWithQboContext` after a token preflight, and maps not-connected / reconnect / token-save /
+  unexpected failures to fixed user copy (no stack, no detail). Every create/update goes to `onWrite` with tool,
+  entity type, entity Id (from the result JSON), `intuit_tid` (from the formatted error) and `ok`; a failing hook is
+  logged by error name only and never changes the response. `RegisterTool` takes an optional `{ wrap }` so the
+  unsupported-parameter warning keeps working in both modes. Why: spec decisions D7 (no deletes hosted), D8 (audit
+  every write), D9 (writes only for owners/admins with a QuickBooks grant).
+- 2026-11-01 — **Request-context review fixes** — (1) `loadTokenStoreEnv()` (new export of `quickbooks-client.ts`)
+  loads the token-store `.env` into `process.env`. `src/index.ts` and `src/auth-server.ts` call it at startup, and
+  `createEnvClient()` calls it too, so `.env` settings read before the client is built (`QUICKBOOKS_ATTACHABLE_BASE_DIR`,
+  `QUICKBOOKS_ATTACHABLE_URL_TIMEOUT_MS`, `QUICKBOOKS_ERROR_LOG_PATH`) work on the first stdio call again. Importing
+  the library still has no side effects. (2) In hosted mode `startOAuthFlow()` never opens a browser or a local
+  callback server. It flags the company through `tokenStore.markReauthRequired` and throws `QboReauthRequiredError`.
+  (3) The lazy `quickbooksClient` passes `instanceof QuickbooksClient` and is not thenable. (4) The upstream
+  `uncaughtException`/`unhandledRejection` loggers moved from module import into `installProcessErrorLogging()`, which
+  only the stdio entries call. Why: the Task 3 review found these four regressions/leaks in the context change.
+- 2026-11-01 — **Per-call QuickBooks request context, fail-closed hosted mode** — new `src/context/qbo-context.ts`
+  (`runWithQboContext`, `currentQboContext`, `enterHostedMode`, `QboNotConnectedError`, `getEnvClient`, types
+  `QboActor` / `QboCallContext`, on `AsyncLocalStorage`). `QuickbooksClient.getInstance()` / `getAuthCredentials()`
+  now use the context's client when there is one, so the unchanged handlers serve one company per call. After
+  `enterHostedMode()`, a call with no context rejects with `QboNotConnectedError` without building the env client,
+  and constructing a `QuickbooksClient` without an explicit `tokenStore` throws (no `.env` fallback). The module-level
+  env read, `dotenv` load and missing-env `throw` in `quickbooks-client.ts` moved into `createEnvClient()`, built
+  lazily and memoized by `getEnvClient()`; `quickbooksClient` stays exported as a lazy stand-in for the env client.
+  Why: the hosted connector imports the library with no `QUICKBOOKS_*` env and must never touch the `.env` store;
+  stdio (`npm start`, `npm run auth`, DPAPI) behaves as before — verified with the sandbox smoke test.
+- 2026-11-01 — **Tool catalog + hosted allowlist** — `src/tools/catalog.ts` now holds `ALL_TOOLS` (the 142 tools
+  `src/index.ts` used to register one by one, same order) and `HOSTED_TOOL_ALLOWLIST` (the 22-tool estimate set the
+  hosted connector may expose). `src/index.ts` registers via a loop over `ALL_TOOLS`. Why: the shared package and the
+  hosted endpoint need one list of tools to consume and a hard allowlist to restrict it; tests pin the count, name
+  uniqueness, allowlist-subset-of-catalog, and the exact allowlist contents (no deletes, no non-estimate writes).
+- 2026-11-01 — **Implementation plan for the package** — `docs/superpowers/plans/2026-11-01-qbo-connector-package.md`:
+  7 tasks (tool catalog + hosted allowlist, TokenStore with refresh lock, fail-closed request context,
+  `registerQboTools` with write gate + audit hook, `handleQboMcpRequest` web-standard handler + package entry,
+  GitHub Packages publish, ProjectPix handoff). Stays on `@modelcontextprotocol/sdk` 1.x, whose
+  `WebStandardStreamableHTTPServerTransport` lets ProjectPix mount it without an SDK migration.
+- 2026-11-01 — **Design: shared package + ProjectPix-hosted remote connector** —
+  `docs/superpowers/specs/2026-11-01-qbo-connector-hosting-design.md` (approved by Johnny). The connector
+  becomes `@formatic-labs/qbo-mcp`, mounted inside ProjectPix (Supabase OAuth logins, per-company QBO keys
+  in Supabase Vault per HomeWatch ADR-016, estimate-only tool allowlist, QBO writes owner/admin-only,
+  existing Intuit app renamed). Supersedes the home-server/Tailscale Funnel hosting plan (handoff steps 3–8).
+  Why: ProjectPix beta contractors need to connect their own QuickBooks; Johnny's Duet workflow needs a
+  connector reachable from the cloud. Sandbox findings that shaped it: `Subtotal: $X.XX` DescriptionOnly
+  lines become live subtotals; deposit is not exposed by the QBO API.
 - 2026-10-05 — **At-rest encryption of secrets (Windows DPAPI).** `src/helpers/token-crypto.ts`: values stored as
   `dpapi:<base64>` are decrypted at startup; with `QUICKBOOKS_TOKEN_ENCRYPTION=dpapi`, rotated refresh tokens are
   written encrypted. `npm run encrypt-env` (`src/encrypt-env.ts`, `src/helpers/encrypt-env-file.ts`) converts an
@@ -28,6 +144,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the browser flow, whose stdout output corrupted the MCP stream ("Connection closed").
 
 ### Changed
+- 2026-11-01 — **TokenStore review fixes.**
+  - A client built with only `tokenStore` (no `refreshToken`) now loads the refresh token, and a stored access token, from the store before treating the company as signed out. Before, it went straight to the "reconnect" path and wrongly called `markReauthRequired`. The sandbox dead-token fallback now starts the browser sign-in directly, so it doesn't reload the dead token from the store.
+  - Ruling R3: when the refresh token rotated, the save is retried up to 3 times inside the lock. With the new client option `strictPersistence: true` (for hosted use), a final failure throws the new `QboTokenPersistError` from `token-store.ts`; its message contains no token values. The default (`false`, stdio) still only logs.
+  - The persist-failure log is now fixed text plus the error's name. It no longer includes the store's error message.
+  - `StoredQboTokens` gains the documented, optional `realmId?` field (set only by the `npm run auth` sign-in).
+  - Why: a hosted company with a valid stored token must never be flagged for reauth. In hosted use the store holds the only copy of a rotated refresh token, so a failed save can't be silently dropped there.
+- 2026-11-01 — **QuickBooks tokens persist through a TokenStore with a refresh lock.** New
+  `src/clients/token-store.ts` (`StoredQboTokens`, `TokenStore` with read/save/withRefreshLock/markReauthRequired,
+  `QboReauthRequiredError`) and `src/clients/env-file-token-store.ts` (`EnvFileTokenStore(path)`: the `.env`
+  read/write that used to live in `QuickbooksClient`, moved over with the same behaviour: DPAPI, atomic write,
+  symlink write-through, file rewritten only when the refresh token rotates or on sign-in; in-process mutex per
+  path; `markReauthRequired` is a no-op, per ruling R1). `QuickbooksClient` takes `tokenStore?` (default
+  `EnvFileTokenStore` at the token-store path) and `accessToken?`/`accessTokenExpiresAt?` seeds. It now refreshes
+  inside `withRefreshLock`: it re-reads the store, uses a still-fresh stored access token without refreshing,
+  otherwise refreshes with the stored refresh token (retrying once with the in-memory token if that is rejected),
+  and saves the refresh token, access token and expiry. A dead or missing token calls `markReauthRequired` and
+  throws `QboReauthRequiredError` with the same message text as before ("run `npm run auth`" for stdio, "re-authorize"
+  for production). Why: QuickBooks refresh tokens rotate, and the hosted connector (serverless, many companies) needs
+  refreshes serialized across instances. Supabase Vault + a row lock will sit behind the same interface. Verified
+  with the crm-estimating sandbox smoke test.
 - `.gitignore`: `.env.production`, `.env.sandbox`, `logs/`.
 
 ## [0.0.1] - 2024-01-13

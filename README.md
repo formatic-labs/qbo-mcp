@@ -411,6 +411,88 @@ QUICKBOOKS_ENVIRONMENT=sandbox  # or 'production'
 
 ---
 
+## Hosted use (ProjectPix)
+
+Besides the stdio server, this fork ships as a library, `@formatic-labs/qbo-mcp`, that a web app mounts as a
+per-company MCP endpoint. The host owns authentication and token storage; the package owns the tools. Hosted mode
+exposes only the estimate-related allowlist (`HOSTED_TOOL_ALLOWLIST`), never a delete tool, and refuses writes unless
+the actor has `canWrite`.
+
+Install (GitHub Packages): commit `.npmrc` with `@formatic-labs:registry=https://npm.pkg.github.com` and set the
+read token as `NPM_RC` in the Vercel project (see `GitHub-Packages-Playbook.md` section 4; clients never receive a
+token). Add `serverExternalPackages: ["@formatic-labs/qbo-mcp", "node-quickbooks", "intuit-oauth"]` to `next.config`:
+it keeps a single copy of the package in the server bundle (the hosted flag set by `enterHostedMode()` is per module
+instance) and avoids bundling trouble with the QuickBooks libraries.
+
+```ts
+// app/api/mcp/qbo/route.ts
+import {
+  enterHostedMode,
+  handleQboMcpRequest,
+  QboNotConnectedError,
+  QuickbooksClient,
+  type TokenStore,
+} from "@formatic-labs/qbo-mcp";
+
+// Module scope, in every host module that builds a QuickbooksClient (this route,
+// the refresh job, the OAuth callback). The hosted flag is per module instance.
+enterHostedMode();
+
+// Stub: implement against Vault (or any encrypted store), one record per company.
+// read() returns the StoredQboTokens { refreshToken, accessToken?, accessTokenExpiresAt? }
+// last saved, or undefined; save(tokens) persists the same shape after every refresh
+// (the refresh token may have rotated). The client never takes the realm from the
+// store: pass realmId from the integration row. withRefreshLock serializes refreshes so a rotated refresh token
+// is never lost; markReauthRequired flags the company as needing to reconnect QuickBooks.
+declare function vaultTokenStore(tenantId: string): TokenStore;
+
+export async function POST(request: Request) {
+  const user = await authenticate(request); // your auth; return 401 if absent
+  if (!user) return new Response("Unauthorized", { status: 401 });
+
+  // Spec D9: writes need owner/admin AND the QuickBooks write grant. Both, not either.
+  const canWrite = (user.role === "owner" || user.role === "admin") && user.hasQboWriteGrant;
+
+  return handleQboMcpRequest(
+    request,
+    // Illustrative AuthInfo: put whatever your resolveContext needs in `extra`.
+    // resolveContext reads it back from `extra.authInfo`.
+    { token: "n/a", clientId: "projectpix", scopes: [], extra: { tenantId: user.tenantId, userId: user.id, canWrite } },
+    {
+      resolveContext: async ({ authInfo }) => {
+        const { tenantId, userId, canWrite } = authInfo!.extra as { tenantId: string; userId: string; canWrite: boolean };
+        const row = await qboIntegrationRow(tenantId); // realm id + environment for this company
+        if (!row) throw new QboNotConnectedError(); // -> "QuickBooks isn't connected" copy
+        const client = new QuickbooksClient({
+          clientId: process.env.QUICKBOOKS_CLIENT_ID!,
+          clientSecret: process.env.QUICKBOOKS_CLIENT_SECRET!,
+          realmId: row.realmId, // required in hosted mode (else QboConfigError)
+          environment: row.environment, // "sandbox" | "production", from the row
+          redirectUri: process.env.QUICKBOOKS_REDIRECT_URI!,
+          tokenStore: vaultTokenStore(tenantId), // required in hosted mode
+          strictPersistence: true,
+        });
+        return { client, actor: { tenantId, userId, canWrite } };
+      },
+      onWrite: async (event) => audit.log(event), // QboWriteAuditEvent: who, which tool, entity type and Id
+    },
+  );
+}
+declare function authenticate(
+  r: Request,
+): Promise<{ id: string; tenantId: string; role: string; hasQboWriteGrant: boolean } | null>;
+declare function qboIntegrationRow(tenantId: string): Promise<{ realmId: string; environment: string } | null>;
+declare const audit: { log(e: unknown): Promise<void> };
+```
+
+Each request builds a fresh stateless server (JSON responses, no session id), so it runs on serverless. Pass `tools`
+to narrow the exposed set; it must be a subset of the allowlist. A name outside it is a programmer error:
+`handleQboMcpRequest` (and a hosted `registerQboTools`) throws, naming the extra tools, and the route returns 500.
+Calling `registerQboTools(server, { hosted: true, ... })` directly gets the same protections: it enters hosted mode
+and enforces the allowlist itself. The package uses `@modelcontextprotocol/sdk` 1.x
+(`WebStandardStreamableHTTPServerTransport`). Publishing is tag-driven:
+pushing `vX.Y.Z` runs `.github/workflows/publish.yml`.
+
 ## Development
 
 ### Building
